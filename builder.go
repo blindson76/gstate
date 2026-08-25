@@ -259,6 +259,15 @@ func (t *TransitionBuilder[S, E, D]) Guard(fn func(D) bool) *TransitionBuilder[S
 	return t
 }
 
+// GuardWith adds a conditional check that also receives the event arguments
+// passed to [Actor.SendWith] or [Actor.SendCtxWith]. It is used when the
+// guard logic depends on data carried with the event rather than the actor
+// data alone. GuardWith is evaluated only when [Guard] is not set.
+func (t *TransitionBuilder[S, E, D]) GuardWith(fn func(D, any) bool) *TransitionBuilder[S, E, D] {
+	t.def.GuardWithArgs = fn
+	return t
+}
+
 // GuardLabel sets an optional label for the guard condition.
 func (t *TransitionBuilder[S, E, D]) GuardLabel(name string) *TransitionBuilder[S, E, D] {
 	t.def.guardName = name
@@ -268,6 +277,15 @@ func (t *TransitionBuilder[S, E, D]) GuardLabel(name string) *TransitionBuilder[
 // Assign adds a data update action to the transition.
 func (t *TransitionBuilder[S, E, D]) Assign(fn func(D) D) *TransitionBuilder[S, E, D] {
 	t.def.Action = fn
+	return t
+}
+
+// AssignWith adds a data update action that also receives the event arguments
+// passed to [Actor.SendWith] or [Actor.SendCtxWith]. It is used when the
+// action logic depends on data carried with the event rather than the actor
+// data alone. AssignWith is executed only when [Assign] is not set.
+func (t *TransitionBuilder[S, E, D]) AssignWith(fn func(D, any) D) *TransitionBuilder[S, E, D] {
+	t.def.ActionWithArgs = fn
 	return t
 }
 
