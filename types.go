@@ -98,8 +98,14 @@ type TransitionDef[S ~string, E ~string, D Cloner[D]] struct {
 	Target S
 	// Guard is an optional predicate that must return true for the transition to fire.
 	Guard func(D) bool
+	// GuardWithArgs is like Guard but also receives the event arguments passed to
+	// [Actor.SendWith] or [Actor.SendCtxWith]. It is evaluated only when Guard is nil.
+	GuardWithArgs func(D, any) bool
 	// Action is a pure function that updates the data during the transition.
 	Action func(D) D
+	// ActionWithArgs is like Action but also receives the event arguments passed to
+	// [Actor.SendWith] or [Actor.SendCtxWith]. It is executed only when Action is nil.
+	ActionWithArgs func(D, any) D
 	// After is the delay before a timed transition fires.
 	After time.Duration
 

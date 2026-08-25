@@ -83,6 +83,7 @@ type Actor[S ~string, E ~string, D Cloner[D]] struct {
 type envelope[E ~string] struct {
 	ctx   context.Context
 	event E
+	args  any
 }
 
 // config holds the resolved configuration for an [Actor]. It is built by
@@ -749,6 +750,40 @@ func (a *Actor[S, E, D]) SendCtx(ctx context.Context, event E) error {
 	}
 }
 
+// SendWith enqueues an event with arguments in the actor's mailbox using
+// [context.Background] as the request-scoped context. It is a thin wrapper
+// over [Actor.SendCtxWith] and discards the returned error. The args value is
+// passed to any [TransitionBuilder.GuardWith] or [TransitionBuilder.AssignWith]
+// handlers registered for the event.
+func (a *Actor[S, E, D]) SendWith(event E, args any) {
+	_ = a.SendCtxWith(context.Background(), event, args)
+}
+
+// SendCtxWith enqueues an event with arguments in the actor's mailbox carrying
+// the supplied request-scoped context. It behaves identically to [Actor.SendCtx]
+// except that args is threaded into [TransitionBuilder.GuardWith] and
+// [TransitionBuilder.AssignWith] handlers registered for the event.
+func (a *Actor[S, E, D]) SendCtxWith(ctx context.Context, event E, args any) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-a.stopped:
+		return ErrActorStopped
+	default:
+	}
+	select {
+	case a.mailbox <- envelope[E]{ctx: ctx, event: event, args: args}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-a.stopped:
+		return ErrActorStopped
+	}
+}
+
 // loop is the main event loop running in a background goroutine. It exits
 // when [Actor.Stop] closes a.stopped. The priority pre-check makes the exit
 // deterministic: once stopped is closed, the next iteration returns without
@@ -765,7 +800,7 @@ func (a *Actor[S, E, D]) loop() {
 		}
 		select {
 		case env := <-a.mailbox:
-			a.handleEvent(env.ctx, env.event)
+			a.handleEvent(env.ctx, env.event, env.args)
 			// After the lock released, check whether the transition
 			// landed us in a "done" top-level state and auto-stop if so.
 			a.maybeAutoStop()
@@ -775,7 +810,7 @@ func (a *Actor[S, E, D]) loop() {
 	}
 }
 
-func (a *Actor[S, E, D]) handleEvent(ctx context.Context, event E) {
+func (a *Actor[S, E, D]) handleEvent(ctx context.Context, event E, args any) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -808,8 +843,19 @@ func (a *Actor[S, E, D]) handleEvent(ctx context.Context, event E) {
 					if !ok {
 						continue
 					}
+				} else if t.GuardWithArgs != nil {
+					ok := t.GuardWithArgs(a.data, args)
+					if len(a.guardObs) > 0 {
+						e := a.newGuardEvent(sID, event, t.Target, ok)
+						for _, o := range a.guardObs {
+							o.OnGuardEvaluated(ctx, e)
+						}
+					}
+					if !ok {
+						continue
+					}
 				}
-				a.executeTransition(ctx, sID, t, event)
+				a.executeTransition(ctx, sID, t, event, args)
 				// Check for transient transitions after the event transition
 				a.handleAlwaysInternal(ctx)
 				return
@@ -830,11 +876,19 @@ func (a *Actor[S, E, D]) handleEvent(ctx context.Context, event E) {
 // entry/exit actions, and data updates. ctx is the request-scoped context
 // for the triggering event (or context.Background() for internal triggers).
 // event is the triggering event ID (zero value for Always/Delayed/Invoke).
-func (a *Actor[S, E, D]) executeTransition(ctx context.Context, sourceID S, t *TransitionDef[S, E, D], event E) {
+func (a *Actor[S, E, D]) executeTransition(ctx context.Context, sourceID S, t *TransitionDef[S, E, D], event E, args any) {
 	// 1. Handle internal transitions (no target)
 	if t.Target == "" {
 		if t.Action != nil {
 			a.data = t.Action(a.data)
+			if len(a.actionObs) > 0 {
+				e := a.newActionEvent(sourceID, event, "")
+				for _, o := range a.actionObs {
+					o.OnActionExecuted(ctx, e)
+				}
+			}
+		} else if t.ActionWithArgs != nil {
+			a.data = t.ActionWithArgs(a.data, args)
 			if len(a.actionObs) > 0 {
 				e := a.newActionEvent(sourceID, event, "")
 				for _, o := range a.actionObs {
@@ -932,6 +986,14 @@ func (a *Actor[S, E, D]) executeTransition(ctx context.Context, sourceID S, t *T
 				o.OnActionExecuted(ctx, e)
 			}
 		}
+	} else if t.ActionWithArgs != nil {
+		a.data = t.ActionWithArgs(a.data, args)
+		if len(a.actionObs) > 0 {
+			e := a.newActionEvent(sourceID, event, t.Target)
+			for _, o := range a.actionObs {
+				o.OnActionExecuted(ctx, e)
+			}
+		}
 	}
 
 	// 4. Enter states from LCA (exclusive) down to target
@@ -1003,7 +1065,7 @@ func (a *Actor[S, E, D]) executeInternalTransition(ctx context.Context, sourceID
 
 	t := &TransitionDef[S, E, D]{Target: targetID}
 	var zero E
-	a.executeTransition(ctx, sourceID, t, zero)
+	a.executeTransition(ctx, sourceID, t, zero, nil)
 	a.handleAlwaysInternal(ctx)
 }
 
@@ -1100,7 +1162,7 @@ func (a *Actor[S, E, D]) handleAlwaysInternal(ctx context.Context) {
 						continue
 					}
 				}
-				a.executeTransition(ctx, sID, t, zero)
+				a.executeTransition(ctx, sID, t, zero, nil)
 				transitioned = true
 				break // restart loop to re-evaluate active states
 			}
