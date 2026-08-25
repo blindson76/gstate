@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sort"
 
-	mm "github.com/floodfx/gstate/internal/mermaid"
+	mm "github.com/blindson76/gstate/internal/mermaid"
 )
 
 // MermaidThemeName identifies a Mermaid color theme.
