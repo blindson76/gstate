@@ -2,7 +2,6 @@ package gstate
 
 import (
 	"testing"
-	"time"
 )
 
 func TestActorBasic(t *testing.T) {
@@ -17,19 +16,22 @@ func TestActorBasic(t *testing.T) {
 		Build()
 
 	actor := Start(m, Context{Count: 0})
+	defer actor.Stop()
 
 	if actor.State() != "idle" {
 		t.Errorf("Expected initial state 'idle', got %s", actor.State())
 	}
 
-	actor.Send("START")
-	time.Sleep(10 * time.Millisecond)
+	if err := actor.Dispatch("START"); err != nil {
+		t.Fatalf("Dispatch(START) err = %v", err)
+	}
 	if actor.State() != "active" {
 		t.Errorf("Expected state 'active' after START event, got %s", actor.State())
 	}
 
-	actor.Send("STOP")
-	time.Sleep(10 * time.Millisecond)
+	if err := actor.Dispatch("STOP"); err != nil {
+		t.Fatalf("Dispatch(STOP) err = %v", err)
+	}
 	if actor.State() != "idle" {
 		t.Errorf("Expected state 'idle' after STOP event, got %s", actor.State())
 	}
