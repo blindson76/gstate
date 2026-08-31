@@ -91,6 +91,9 @@ type envelope[E ~string] struct {
 	ctx   context.Context
 	event E
 	args  any
+	// done is non-nil for synchronous dispatch (Dispatch/DispatchCtx).
+	// The loop closes it after handleEvent returns, unblocking the caller.
+	done chan struct{}
 }
 
 // config holds the resolved configuration for an [Actor]. It is built by
@@ -838,7 +841,127 @@ func (a *Actor[S, E, D]) SendCtxWith(ctx context.Context, event E, args any) err
 	}
 }
 
-// loop is the main event loop running in a background goroutine. It exits
+// Dispatch enqueues an event and blocks until the actor has fully processed
+// it — including any chained Always transitions triggered by the event —
+// before returning. This provides run-to-completion (RTC) semantics from
+// the caller's perspective: the machine runs its complete step before
+// control returns.
+//
+// Dispatch uses [context.Background] as the request-scoped context.
+// Use [Actor.DispatchCtx] to supply a custom context.
+//
+// Returns:
+//   - nil when the event was fully processed.
+//   - [ErrActorStopped] when the actor was stopped before the event was
+//     enqueued or before processing completed.
+func (a *Actor[S, E, D]) Dispatch(event E) error {
+	return a.DispatchCtx(context.Background(), event)
+}
+
+// DispatchCtx enqueues an event and blocks until the actor has fully
+// processed it, including all chained Always transitions. It is the
+// blocking counterpart of [Actor.SendCtx] and provides run-to-completion
+// semantics for callers that need the machine to reach a stable
+// configuration before proceeding.
+//
+// The ctx governs the enqueue step only. Once the event has been accepted
+// into the mailbox, DispatchCtx waits unconditionally for the actor to
+// finish processing it (or for the actor to stop).
+//
+// Returns:
+//   - nil when the event was fully processed.
+//   - ctx.Err() ([context.Canceled] or [context.DeadlineExceeded]) when
+//     the supplied context was cancelled before the event could be enqueued.
+//     The event is NOT delivered.
+//   - [ErrActorStopped] when the actor was stopped before the event was
+//     enqueued, or stopped while waiting for processing to complete.
+func (a *Actor[S, E, D]) DispatchCtx(ctx context.Context, event E) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-a.stopped:
+		return ErrActorStopped
+	default:
+	}
+	done := make(chan struct{})
+	select {
+	case a.mailbox <- envelope[E]{ctx: ctx, event: event, done: done}:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-a.stopped:
+		return ErrActorStopped
+	}
+	// Prioritise done over stopped: if the event was processed and the
+	// machine auto-stopped as a result, done closes first (in the loop,
+	// close(done) precedes maybeAutoStop). The double-select ensures we
+	// return nil in that case rather than racing with a.stopped.
+	select {
+	case <-done:
+		return nil
+	default:
+	}
+	select {
+	case <-done:
+		return nil
+	case <-a.stopped:
+		return ErrActorStopped
+	}
+}
+
+// DispatchWith enqueues an event with arguments and blocks until the actor
+// has fully processed it. It is the blocking counterpart of [Actor.SendWith].
+//
+// Returns:
+//   - nil when the event was fully processed.
+//   - [ErrActorStopped] when the actor was stopped before or during processing.
+func (a *Actor[S, E, D]) DispatchWith(event E, args any) error {
+	return a.DispatchCtxWith(context.Background(), event, args)
+}
+
+// DispatchCtxWith enqueues an event with arguments and blocks until the actor
+// has fully processed it. It is the blocking counterpart of
+// [Actor.SendCtxWith] and provides run-to-completion semantics.
+//
+// Returns:
+//   - nil when the event was fully processed.
+//   - ctx.Err() when the context was cancelled before the event was enqueued.
+//   - [ErrActorStopped] when the actor was stopped before or during processing.
+func (a *Actor[S, E, D]) DispatchCtxWith(ctx context.Context, event E, args any) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-a.stopped:
+		return ErrActorStopped
+	default:
+	}
+	done := make(chan struct{})
+	select {
+	case a.mailbox <- envelope[E]{ctx: ctx, event: event, args: args, done: done}:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-a.stopped:
+		return ErrActorStopped
+	}
+	select {
+	case <-done:
+		return nil
+	default:
+	}
+	select {
+	case <-done:
+		return nil
+	case <-a.stopped:
+		return ErrActorStopped
+	}
+}
+
+
 // when [Actor.Stop] closes a.stopped. The priority pre-check makes the exit
 // deterministic: once stopped is closed, the next iteration returns without
 // pulling any further buffered events from the mailbox.
@@ -855,6 +978,9 @@ func (a *Actor[S, E, D]) loop() {
 		select {
 		case env := <-a.mailbox:
 			a.handleEvent(env.ctx, env.event, env.args)
+			if env.done != nil {
+				close(env.done)
+			}
 			// After the lock released, check whether the transition
 			// landed us in a "done" top-level state and auto-stop if so.
 			a.maybeAutoStop()
