@@ -76,6 +76,13 @@ type Actor[S ~string, E ~string, D Cloner[D]] struct {
 	// Nil means stale; rebuilt lazily on next call. Invalidated by
 	// enterSingleState and exitState.
 	sortedActive []S
+
+	// runToCompletion indicates that the actor was started in run-to-completion
+	// mode (via [Machine.WithRunToCompletion]). In this mode there is no
+	// background goroutine or mailbox: Send/SendCtx call handleEvent directly
+	// in the caller's goroutine and return only after all transitions—including
+	// any chained Always transitions—have completed.
+	runToCompletion bool
 }
 
 // envelope carries an event together with the request-scoped context that
@@ -89,9 +96,10 @@ type envelope[E ~string] struct {
 // config holds the resolved configuration for an [Actor]. It is built by
 // applying [Option] values passed to [Start].
 type config[S ~string, E ~string, D Cloner[D]] struct {
-	mailboxSize int
-	observers   []Observer[S, E, D]
-	actorID     ActorID
+	mailboxSize     int
+	observers       []Observer[S, E, D]
+	actorID         ActorID
+	runToCompletion bool
 }
 
 // Option configures an [Actor] at [Start] or [Hydrate] time. Options are
@@ -129,6 +137,32 @@ func (m *Machine[S, E, D]) WithActorID(id ActorID) Option[S, E, D] {
 	return func(c *config[S, E, D]) { c.actorID = id }
 }
 
+// WithRunToCompletion returns an [Option] that enables run-to-completion mode
+// for the actor. In this mode the actor has no background goroutine or mailbox:
+// [Actor.Send], [Actor.SendCtx], [Actor.SendWith], and [Actor.SendCtxWith] all
+// process the event synchronously in the caller's goroutine and return only
+// after all transitions—including any chained [StateDef.Always] transitions—
+// have completed.
+//
+// When to use run-to-completion mode:
+//
+//   - Tests that need to inspect state immediately after Send without
+//     installing an observer barrier or calling time.Sleep.
+//   - Single-threaded or embedded contexts where a background goroutine is
+//     undesirable.
+//
+// Limitations:
+//
+//   - Concurrent calls to Send from multiple goroutines are serialised by the
+//     actor's internal write lock, but callers must ensure they do not call
+//     Send re-entrantly (e.g. from inside an entry/exit action or guard), as
+//     that would deadlock.
+//   - [InvokeDef] services and delayed transitions still run in their own
+//     goroutines; only external event delivery becomes synchronous.
+func (m *Machine[S, E, D]) WithRunToCompletion() Option[S, E, D] {
+	return func(c *config[S, E, D]) { c.runToCompletion = true }
+}
+
 // Start creates and launches a new [Actor] for the given machine. Options are
 // applied in order; later values for the same option win. The returned Actor
 // is already running and ready to receive events via [Actor.Send] or
@@ -146,16 +180,19 @@ func Start[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], initialData D
 	}
 
 	a := &Actor[S, E, D]{
-		machine:     m,
-		data:        initialData,
-		active:      make(map[S]bool),
-		history:     make(map[S]S),
-		invocations: make(map[S]context.CancelFunc),
-		invokeGens:  make(map[S]uint64),
-		timers:      make(map[S][]*time.Timer),
-		mailbox:     make(chan envelope[E], cfg.mailboxSize),
-		stopped:     make(chan struct{}),
-		id:          cfg.actorID,
+		machine:         m,
+		data:            initialData,
+		active:          make(map[S]bool),
+		history:         make(map[S]S),
+		invocations:     make(map[S]context.CancelFunc),
+		invokeGens:      make(map[S]uint64),
+		timers:          make(map[S][]*time.Timer),
+		stopped:         make(chan struct{}),
+		id:              cfg.actorID,
+		runToCompletion: cfg.runToCompletion,
+	}
+	if !cfg.runToCompletion {
+		a.mailbox = make(chan envelope[E], cfg.mailboxSize)
 	}
 	a.installObservers(cfg.observers)
 
@@ -167,8 +204,10 @@ func Start[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], initialData D
 	a.handleAlwaysInternal(context.Background())
 	a.mu.Unlock()
 
-	a.wg.Add(1)
-	go a.loop()
+	if !cfg.runToCompletion {
+		a.wg.Add(1)
+		go a.loop()
+	}
 
 	// If the Initial chain landed on a top-level "done" state, auto-stop
 	// immediately. This handles machines whose Initial points directly
@@ -220,16 +259,19 @@ func Hydrate[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], snapshot Sn
 	}
 
 	a := &Actor[S, E, D]{
-		machine:     m,
-		data:        snapshot.Data,
-		active:      active,
-		history:     history,
-		invocations: make(map[S]context.CancelFunc),
-		invokeGens:  make(map[S]uint64),
-		timers:      make(map[S][]*time.Timer),
-		mailbox:     make(chan envelope[E], cfg.mailboxSize),
-		stopped:     make(chan struct{}),
-		id:          id,
+		machine:         m,
+		data:            snapshot.Data,
+		active:          active,
+		history:         history,
+		invocations:     make(map[S]context.CancelFunc),
+		invokeGens:      make(map[S]uint64),
+		timers:          make(map[S][]*time.Timer),
+		stopped:         make(chan struct{}),
+		id:              id,
+		runToCompletion: cfg.runToCompletion,
+	}
+	if !cfg.runToCompletion {
+		a.mailbox = make(chan envelope[E], cfg.mailboxSize)
 	}
 	a.installObservers(cfg.observers)
 
@@ -240,8 +282,10 @@ func Hydrate[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], snapshot Sn
 	}
 	a.mu.Unlock()
 
-	a.wg.Add(1)
-	go a.loop()
+	if !cfg.runToCompletion {
+		a.wg.Add(1)
+		go a.loop()
+	}
 
 	// If the hydrated snapshot is already in a "done" state, auto-stop.
 	a.maybeAutoStop()
@@ -714,31 +758,36 @@ func (a *Actor[S, E, D]) Send(event E) {
 // callback fired in response to this event (including Always transitions
 // chained after it) AND it gates the enqueue itself.
 //
+// In run-to-completion mode ([Machine.WithRunToCompletion]) the event is
+// processed synchronously in the caller's goroutine before SendCtx returns.
+//
 // Returns:
-//   - nil when the event was enqueued.
+//   - nil when the event was delivered (or, in async mode, enqueued).
 //   - ctx.Err() ([context.Canceled] or [context.DeadlineExceeded]) when
 //     the supplied context was cancelled or its deadline elapsed before
-//     the event could be enqueued. The event is NOT delivered.
+//     the event could be delivered. The event is NOT delivered.
 //   - [ErrActorStopped] when the actor was stopped before the event could
-//     be enqueued. The event is NOT delivered.
+//     be delivered. The event is NOT delivered.
 //
-// Behaviour when the mailbox is full: SendCtx blocks until one of three
-// things happens — a slot opens, ctx is done, or the actor is stopped.
-// It never blocks forever.
+// Behaviour when the mailbox is full (async mode only): SendCtx blocks until
+// one of three things happens — a slot opens, ctx is done, or the actor is
+// stopped. It never blocks forever.
 func (a *Actor[S, E, D]) SendCtx(ctx context.Context, event E) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	// Fast path: bail before enqueueing if ctx or actor is already done.
-	// Without this, the inner select could pick the mailbox-send case
-	// even when ctx is already cancelled (select chooses fairly among
-	// ready cases) and we'd deliver an event whose ctx is dead.
+	// Fast path: bail before delivering if ctx or actor is already done.
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-a.stopped:
 		return ErrActorStopped
 	default:
+	}
+	if a.runToCompletion {
+		a.handleEvent(ctx, event, nil)
+		a.maybeAutoStop()
+		return nil
 	}
 	select {
 	case a.mailbox <- envelope[E]{ctx: ctx, event: event}:
@@ -773,6 +822,11 @@ func (a *Actor[S, E, D]) SendCtxWith(ctx context.Context, event E, args any) err
 	case <-a.stopped:
 		return ErrActorStopped
 	default:
+	}
+	if a.runToCompletion {
+		a.handleEvent(ctx, event, args)
+		a.maybeAutoStop()
+		return nil
 	}
 	select {
 	case a.mailbox <- envelope[E]{ctx: ctx, event: event, args: args}:
