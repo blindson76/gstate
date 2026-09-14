@@ -112,6 +112,7 @@ type config[S ~string, E ~string, D Cloner[D]] struct {
 // annotations:
 //
 //	actor := gstate.Start(m, ctx,
+//	    true,
 //	    m.WithMailboxSize(500),
 //	    m.WithObservers(obs),
 //	    m.WithActorID("worker-42"),
