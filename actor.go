@@ -182,6 +182,8 @@ func (m *Machine[S, E, D]) WithRunToCompletion() Option[S, E, D] {
 //
 // The activate flag controls whether invoke/timer services should start
 // immediately (true) or be deferred until [Actor.Activate] is called (false).
+// This works in both mailbox mode and [Machine.WithRunToCompletion] mode:
+// activation only affects invoke/timer services, not synchronous Send behavior.
 func Start[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], initialData D, activate bool, opts ...Option[S, E, D]) *Actor[S, E, D] {
 	cfg := resolveConfig[S, E, D](opts...)
 	if cfg.actorID == "" {
@@ -241,7 +243,8 @@ func Start[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], initialData D
 // The [ActorID] is resolved in priority order: [WithActorID] if supplied,
 // otherwise the ActorID stored in the snapshot.
 //
-// The activate flag has the same contract as [Start].
+// The activate flag has the same contract as [Start], including in
+// [Machine.WithRunToCompletion] mode.
 func Hydrate[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], snapshot Snapshot[S, D], activate bool, opts ...Option[S, E, D]) *Actor[S, E, D] {
 	cfg := resolveConfig[S, E, D](opts...)
 
@@ -543,7 +546,8 @@ func (a *Actor[S, E, D]) Stop() {
 
 // Activate starts invoke/timer services for currently active states when they
 // were previously deferred at [Start] or [Hydrate]. Calling Activate multiple
-// times is safe; only the first call starts services.
+// times is safe; only the first call starts services. Activate is supported in
+// both mailbox mode and [Machine.WithRunToCompletion] mode.
 func (a *Actor[S, E, D]) Activate() {
 	a.mu.Lock()
 	defer a.mu.Unlock()

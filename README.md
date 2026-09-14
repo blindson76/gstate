@@ -524,6 +524,8 @@ Available options:
 - `WithActorID(id)` — override the auto-generated [`ActorID`](#actor-identity).
 - `activate` argument (`true`/`false`) — controls whether invoke/timer services start immediately or wait for `Actor.Activate()`.
 
+`activate` affects only invoke/timer services. `Send`/`SendCtx` behavior stays the same, including when `WithRunToCompletion()` is enabled.
+
 ### Actor Identity
 
 Every actor is born with a stable `ActorID`. When you don't supply one via `WithActorID`, `Start` generates a short URL-safe nanoid:
