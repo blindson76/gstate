@@ -287,11 +287,13 @@ func Hydrate[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], snapshot Sn
 
 	// Restart background services for all active states.
 	if activate {
-		a.mu.Lock()
+		ids := make([]S, 0, len(active))
 		for sID := range active {
-			a.restartServices(context.Background(), sID)
+			ids = append(ids, sID)
 		}
-		a.mu.Unlock()
+		for _, sID := range ids {
+			a.startServicesForState(context.Background(), sID)
+		}
 	}
 
 	if !cfg.runToCompletion {
@@ -550,21 +552,45 @@ func (a *Actor[S, E, D]) Stop() {
 // both mailbox mode and [Machine.WithRunToCompletion] mode.
 func (a *Actor[S, E, D]) Activate() {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-
 	if a.servicesActive {
+		a.mu.Unlock()
 		return
 	}
+	select {
+	case <-a.stopped:
+		a.mu.Unlock()
+		return
+	default:
+	}
+	a.servicesActive = true
+	ids := a.activeStateIDsLocked()
+	a.mu.Unlock()
+
+	for _, sID := range ids {
+		a.startServicesForState(context.Background(), sID)
+	}
+}
+
+func (a *Actor[S, E, D]) activeStateIDsLocked() []S {
+	ids := make([]S, 0, len(a.active))
+	for sID := range a.active {
+		ids = append(ids, sID)
+	}
+	return ids
+}
+
+func (a *Actor[S, E, D]) startServicesForState(ctx context.Context, id S) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	select {
 	case <-a.stopped:
 		return
 	default:
 	}
-
-	a.servicesActive = true
-	for sID := range a.active {
-		a.restartServices(context.Background(), sID)
+	if !a.active[id] {
+		return
 	}
+	a.restartServices(ctx, id)
 }
 
 // ID returns the actor's stable identifier. The ID is generated on [Start]

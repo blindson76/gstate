@@ -104,3 +104,27 @@ func TestActivateIsIdempotentWhenServicesAlreadyStarted(t *testing.T) {
 		t.Fatalf("invoke starts after repeated Activate = %d, want 1", got)
 	}
 }
+
+func TestActivateIsIdempotentAfterDeferredStart(t *testing.T) {
+	// This test synchronizes on observer channels for correctness and uses
+	// time.After only as a hard timeout floor to avoid hanging forever when
+	// the signal never arrives due to regression.
+	m := invokeMachine()
+	rec := &RecordingObserver[StateID, EventID, Context]{}
+	bar := newKindBarrier(KindInvokeStarted, 1)
+	a := Start(m, Context{}, false, m.WithObservers(rec, bar))
+	defer a.Stop()
+
+	a.Activate()
+	a.Activate()
+
+	select {
+	case <-bar.done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timed out waiting for deferred invoke start")
+	}
+
+	if got := len(rec.InvokeStarted()); got != 1 {
+		t.Fatalf("invoke starts after deferred repeated Activate = %d, want 1", got)
+	}
+}
