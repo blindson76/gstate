@@ -51,7 +51,11 @@ func TestHydrateWithActivateFalseDefersServicesUntilActivate(t *testing.T) {
 	// time.After only as a hard timeout floor to avoid hanging forever when
 	// the signal never arrives due to regression.
 	m := invokeMachine()
-	original := Start(m, Context{}, false)
+	originalRec := &RecordingObserver[StateID, EventID, Context]{}
+	original := Start(m, Context{}, true, m.WithObservers(originalRec))
+	if got := len(originalRec.InvokeStarted()); got != 1 {
+		t.Fatalf("expected source actor invoke to be active before snapshot, got %d starts", got)
+	}
 	snap := original.Snapshot()
 	original.Stop()
 
