@@ -56,7 +56,7 @@ func TestObserverCannotMutateActorData(t *testing.T) {
 
 	rec := &RecordingObserver[StateID, EventID, Context]{}
 	bar := newKindBarrier(KindTransition, 1)
-	a := Start(m, Context{Count: 1},
+	a := Start(m, Context{Count: 1}, true,
 		m.WithObservers(mutatingObserver{}, rec, bar),
 	)
 	defer a.Stop()
@@ -103,7 +103,7 @@ func TestObserverUsesClonerWhenAvailable(t *testing.T) {
 	rec := &RecordingObserver[cState, cEvent, cloningContext]{}
 	barrier := make(chan struct{}, 1)
 	signal := &cloneSignalObserver{ch: barrier}
-	a := Start(m, initial, m.WithObservers(rec, signal))
+	a := Start(m, initial, true, m.WithObservers(rec, signal))
 	defer a.Stop()
 	a.Send("GO")
 
@@ -161,7 +161,7 @@ func TestSnapshotRacesInvokeWrites(t *testing.T) {
 		State("c", func(_ *StateBuilder[string, string, *raceContext]) {}).
 		Build()
 
-	a := Start(m, &raceContext{Count: 0})
+	a := Start(m, &raceContext{Count: 0}, true)
 	defer a.Stop()
 
 	// Perform multiple Snapshots concurrently while the invoke loop is writing.
@@ -202,7 +202,7 @@ func TestInvokeMutateAfterStateExit(t *testing.T) {
 		State("b", func(_ *StateBuilder[StateID, EventID, Context]) {}).
 		Build()
 
-	a := Start(m, Context{Count: 42})
+	a := Start(m, Context{Count: 42}, true)
 	<-mutateCalled
 
 	a.Send("GO")
@@ -240,7 +240,7 @@ func TestInvokeMutateAfterStop(t *testing.T) {
 		State("b", func(_ *StateBuilder[StateID, EventID, Context]) {}).
 		Build()
 
-	a := Start(m, Context{Count: 42})
+	a := Start(m, Context{Count: 42}, true)
 	<-mutateCalled
 
 	a.Stop()
@@ -286,7 +286,7 @@ func TestInvokeReentryNewGeneration(t *testing.T) {
 		}).
 		Build()
 
-	a := Start(m, Context{Count: 42})
+	a := Start(m, Context{Count: 42}, true)
 	<-mutate1Called
 
 	a.Send("GO")
@@ -332,7 +332,7 @@ func TestInvokeSnapStability(t *testing.T) {
 		State("c", func(_ *StateBuilder[string, string, stabilityCtx]) {}).
 		Build()
 
-	a := Start(m, stabilityCtx{Count: 42})
+	a := Start(m, stabilityCtx{Count: 42}, true)
 	defer a.Stop()
 	<-done
 }
@@ -384,7 +384,7 @@ func TestInvokeParallelConcurrentMutate(t *testing.T) {
 		}).
 		Build()
 
-	a := Start(m, stabilityCtx{Count: 0})
+	a := Start(m, stabilityCtx{Count: 0}, true)
 	defer a.Stop()
 
 	<-done1
@@ -435,5 +435,3 @@ func TestJSONWireFormat(t *testing.T) {
 		t.Errorf("Silent-Zero policy failed: expected snap3.Data.Count to be zero (ignored/unpopulated), got %d", snap3.Data.Count)
 	}
 }
-
-

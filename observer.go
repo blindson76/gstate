@@ -92,7 +92,6 @@ type EventDroppedObserver[S ~string, E ~string, D Cloner[D]] interface {
 	OnEventDropped(context.Context, *EventNotice[S, E, D])
 }
 
-
 // ActorID is the stable identifier for a running [Actor]. It is generated on
 // [Start] (unless overridden via [WithActorID]) and survives [Actor.Snapshot]
 // and [Hydrate] so telemetry can correlate across persistence boundaries.
@@ -114,10 +113,10 @@ const (
 
 // TransitionEvent is the payload for [Observer.OnTransition].
 type TransitionEvent[S ~string, E ~string, D Cloner[D]] struct {
-	MachineID string    `json:"machine_id"`
-	ActorID   ActorID   `json:"actor_id"`
-	From      S         `json:"from"`
-	To        S         `json:"to"`
+	MachineID string  `json:"machine_id"`
+	ActorID   ActorID `json:"actor_id"`
+	From      S       `json:"from"`
+	To        S       `json:"to"`
 	// Event is the triggering event. Zero value when the transition fires from
 	// an Always, Delayed, or invoke-completion path.
 	Event     E         `json:"event,omitempty"`
@@ -161,9 +160,9 @@ func (e *TransitionEvent[S, E, D]) String() string {
 // only when the transition defines a non-nil Guard, so the absence of an
 // event does not imply the absence of guard evaluation.
 type GuardEvent[S ~string, E ~string, D Cloner[D]] struct {
-	MachineID string    `json:"machine_id"`
-	ActorID   ActorID   `json:"actor_id"`
-	State     S         `json:"state"`
+	MachineID string  `json:"machine_id"`
+	ActorID   ActorID `json:"actor_id"`
+	State     S       `json:"state"`
 	// Event is the triggering event. Zero value for Always guards.
 	Event     E         `json:"event,omitempty"`
 	Target    S         `json:"target"`
@@ -362,7 +361,7 @@ func (e EventNotice[S, E, D]) String() string {
 //	obs := gstate.SignalObserver[MyState, MyEvent, MyData](func() {
 //	    select { case ready <- struct{}{}: default: }
 //	})
-//	actor := gstate.Start(machine, ctx, machine.WithObservers(obs))
+//	actor := gstate.Start(machine, ctx, true, machine.WithObservers(obs))
 //	actor.Send(EventGo)
 //	<-ready
 func SignalObserver[S ~string, E ~string, D Cloner[D]](signal func()) Observer[S, E, D] {
@@ -418,7 +417,7 @@ func (o signalObserver[S, E, D]) OnEventDropped(context.Context, *EventNotice[S,
 //	    AnyFunc:        func(ctx context.Context) { /* ... */ },
 //	    TransitionFunc: func(ctx context.Context, e *gstate.TransitionEvent[MyState, MyEvent, MyData]) { /* ... */ },
 //	}
-//	actor := gstate.Start(machine, ctx, machine.WithObservers(obs))
+//	actor := gstate.Start(machine, ctx, true, machine.WithObservers(obs))
 //
 // ObserverFuncs values are passed by value; the implementation uses
 // value receivers. Do not mutate fields after installing on an actor.

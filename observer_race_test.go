@@ -27,7 +27,7 @@ func TestObserverConcurrentSendAndRead(t *testing.T) {
 		}).
 		Build()
 
-	a := Start(m, Context{},
+	a := Start(m, Context{}, true,
 		m.WithObservers(rec, bar),
 		m.WithMailboxSize(1024),
 	)

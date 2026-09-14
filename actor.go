@@ -43,13 +43,13 @@ type Actor[S ~string, E ~string, D Cloner[D]] struct {
 	// invokeGens maps active state IDs to their active entry generation token.
 	// This token ensures that a stale mutate closure spawned during a previous
 	// state entry cannot apply mutations after the state has exited or re-entered.
-	invokeGens  map[S]uint64
+	invokeGens map[S]uint64
 	// nextGen tracks the monotonic generation count for state entries.
-	nextGen     uint64
-	timers      map[S][]*time.Timer
-	mailbox     chan envelope[E]
-	mu          sync.RWMutex
-	stopOnce    sync.Once
+	nextGen  uint64
+	timers   map[S][]*time.Timer
+	mailbox  chan envelope[E]
+	mu       sync.RWMutex
+	stopOnce sync.Once
 	// stopped is closed exactly once by Stop to signal shutdown to the loop
 	// goroutine and to any caller parked in [Actor.SendCtx]'s select. Using a
 	// dedicated channel (rather than closing the mailbox) avoids the
@@ -83,6 +83,9 @@ type Actor[S ~string, E ~string, D Cloner[D]] struct {
 	// in the caller's goroutine and return only after all transitions—including
 	// any chained Always transitions—have completed.
 	runToCompletion bool
+	// servicesActive controls whether invoke/timer services should be started
+	// when states are entered. It can be enabled later via [Actor.Activate].
+	servicesActive bool
 }
 
 // envelope carries an event together with the request-scoped context that
@@ -109,11 +112,23 @@ type config[S ~string, E ~string, D Cloner[D]] struct {
 // annotations:
 //
 //	actor := gstate.Start(m, ctx,
+//	    true,
 //	    m.WithMailboxSize(500),
 //	    m.WithObservers(obs),
 //	    m.WithActorID("worker-42"),
 //	)
 type Option[S ~string, E ~string, D Cloner[D]] func(*config[S, E, D])
+
+func resolveConfig[S ~string, E ~string, D Cloner[D]](opts ...Option[S, E, D]) config[S, E, D] {
+	cfg := config[S, E, D]{mailboxSize: defaultMailboxSize}
+	for _, o := range opts {
+		o(&cfg)
+	}
+	if cfg.mailboxSize <= 0 {
+		cfg.mailboxSize = defaultMailboxSize
+	}
+	return cfg
+}
 
 // WithMailboxSize returns an [Option] that sets the buffered capacity of the
 // actor's event channel. When omitted, the default is 100. Values <= 0 fall
@@ -163,18 +178,14 @@ func (m *Machine[S, E, D]) WithRunToCompletion() Option[S, E, D] {
 	return func(c *config[S, E, D]) { c.runToCompletion = true }
 }
 
-// Start creates and launches a new [Actor] for the given machine. Options are
-// applied in order; later values for the same option win. The returned Actor
-// is already running and ready to receive events via [Actor.Send] or
-// [Actor.SendCtx].
-func Start[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], initialData D, opts ...Option[S, E, D]) *Actor[S, E, D] {
-	cfg := config[S, E, D]{mailboxSize: defaultMailboxSize}
-	for _, o := range opts {
-		o(&cfg)
-	}
-	if cfg.mailboxSize <= 0 {
-		cfg.mailboxSize = defaultMailboxSize
-	}
+// Start creates and launches a new [Actor] for the given machine.
+//
+// The activate flag controls whether invoke/timer services should start
+// immediately (true) or be deferred until [Actor.Activate] is called (false).
+// This works in both mailbox mode and [Machine.WithRunToCompletion] mode:
+// activation only affects invoke/timer services, not synchronous Send behavior.
+func Start[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], initialData D, activate bool, opts ...Option[S, E, D]) *Actor[S, E, D] {
+	cfg := resolveConfig[S, E, D](opts...)
 	if cfg.actorID == "" {
 		cfg.actorID = ActorID(idGen())
 	}
@@ -190,6 +201,7 @@ func Start[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], initialData D
 		stopped:         make(chan struct{}),
 		id:              cfg.actorID,
 		runToCompletion: cfg.runToCompletion,
+		servicesActive:  activate,
 	}
 	if !cfg.runToCompletion {
 		a.mailbox = make(chan envelope[E], cfg.mailboxSize)
@@ -230,14 +242,11 @@ func Start[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], initialData D
 //
 // The [ActorID] is resolved in priority order: [WithActorID] if supplied,
 // otherwise the ActorID stored in the snapshot.
-func Hydrate[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], snapshot Snapshot[S, D], opts ...Option[S, E, D]) *Actor[S, E, D] {
-	cfg := config[S, E, D]{mailboxSize: defaultMailboxSize}
-	for _, o := range opts {
-		o(&cfg)
-	}
-	if cfg.mailboxSize <= 0 {
-		cfg.mailboxSize = defaultMailboxSize
-	}
+//
+// The activate flag has the same contract as [Start], including in
+// [Machine.WithRunToCompletion] mode.
+func Hydrate[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], snapshot Snapshot[S, D], activate bool, opts ...Option[S, E, D]) *Actor[S, E, D] {
+	cfg := resolveConfig[S, E, D](opts...)
 
 	active := make(map[S]bool)
 	for _, sID := range snapshot.Active {
@@ -269,18 +278,23 @@ func Hydrate[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], snapshot Sn
 		stopped:         make(chan struct{}),
 		id:              id,
 		runToCompletion: cfg.runToCompletion,
+		servicesActive:  activate,
 	}
 	if !cfg.runToCompletion {
 		a.mailbox = make(chan envelope[E], cfg.mailboxSize)
 	}
 	a.installObservers(cfg.observers)
 
-	// Restart background services for all active states
-	a.mu.Lock()
-	for sID := range active {
-		a.restartServices(context.Background(), sID)
+	// Restart background services for all active states.
+	if activate {
+		ids := make([]S, 0, len(active))
+		for sID := range active {
+			ids = append(ids, sID)
+		}
+		for _, sID := range ids {
+			a.startServicesForState(context.Background(), sID)
+		}
 	}
-	a.mu.Unlock()
 
 	if !cfg.runToCompletion {
 		a.wg.Add(1)
@@ -394,7 +408,6 @@ func (a *Actor[S, E, D]) newEventNotice(event E, reason string) *EventNotice[S, 
 		Timestamp: time.Now(),
 	}
 }
-
 
 // isStateDoneLocked returns true if the subtree rooted at sID has reached
 // its completion state per SCXML semantics. Must be called with a.mu held
@@ -533,6 +546,53 @@ func (a *Actor[S, E, D]) Stop() {
 	})
 }
 
+// Activate starts invoke/timer services for currently active states when they
+// were previously deferred at [Start] or [Hydrate]. Calling Activate multiple
+// times is safe; only the first call starts services. Activate is supported in
+// both mailbox mode and [Machine.WithRunToCompletion] mode.
+func (a *Actor[S, E, D]) Activate() {
+	a.mu.Lock()
+	if a.servicesActive {
+		a.mu.Unlock()
+		return
+	}
+	select {
+	case <-a.stopped:
+		a.mu.Unlock()
+		return
+	default:
+	}
+	a.servicesActive = true
+	ids := a.activeStateIDsLocked()
+	a.mu.Unlock()
+
+	for _, sID := range ids {
+		a.startServicesForState(context.Background(), sID)
+	}
+}
+
+func (a *Actor[S, E, D]) activeStateIDsLocked() []S {
+	ids := make([]S, 0, len(a.active))
+	for sID := range a.active {
+		ids = append(ids, sID)
+	}
+	return ids
+}
+
+func (a *Actor[S, E, D]) startServicesForState(ctx context.Context, id S) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	select {
+	case <-a.stopped:
+		return
+	default:
+	}
+	if !a.active[id] {
+		return
+	}
+	a.restartServices(ctx, id)
+}
+
 // ID returns the actor's stable identifier. The ID is generated on [Start]
 // (unless overridden with [WithActorID]) and is preserved across
 // [Actor.Snapshot] and [Hydrate] so telemetry can correlate the same logical
@@ -584,7 +644,7 @@ func (a *Actor[S, E, D]) restartServices(ctx context.Context, id S) {
 				return
 			default:
 			}
-			// Reject mutations if the state has exited or if a new entry has 
+			// Reject mutations if the state has exited or if a new entry has
 			// superseded this invoke's generation (e.g. during A -> B -> A cycling).
 			if a.invokeGens[id] != gen {
 				return
@@ -1104,7 +1164,9 @@ func (a *Actor[S, E, D]) enterSingleState(ctx context.Context, id S) {
 		}
 	}
 
-	a.restartServices(ctx, id)
+	if a.servicesActive {
+		a.restartServices(ctx, id)
+	}
 }
 
 // executeInternalTransition handles transitions triggered by services (invokes/timers).
@@ -1173,7 +1235,6 @@ func (a *Actor[S, E, D]) isDescendant(childID, parentID S) bool {
 	}
 	return false
 }
-
 
 // handleAlwaysInternal checks active states for Always transitions.
 // Must be called with a write lock.

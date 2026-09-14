@@ -24,7 +24,7 @@ func TestActorHierarchical(t *testing.T) {
 		}).
 		Build()
 
-	actor := Start(m, Context{})
+	actor := Start(m, Context{}, true)
 
 	// Initial state should be [parent, child1]
 	// But currently our Start only sets a single state ID.

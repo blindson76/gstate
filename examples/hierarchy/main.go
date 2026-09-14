@@ -52,7 +52,7 @@ func main() {
 		Build()
 
 	fmt.Println("--- Starting Actor ---")
-	actor := gstate.Start(machine, MyData{})
+	actor := gstate.Start(machine, MyData{}, true)
 
 	// actor.States() returns ALL active states from root to leaf.
 	fmt.Printf("Initial States Stack: %v\n", actor.States())

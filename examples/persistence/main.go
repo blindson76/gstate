@@ -42,7 +42,7 @@ func main() {
 		Build()
 
 	fmt.Println("--- Step 1: Start Actor and Trigger a Transition ---")
-	actor1 := gstate.Start(machine, MyData{Value: "initial"})
+	actor1 := gstate.Start(machine, MyData{Value: "initial"}, true)
 	actor1.Send("NEXT")
 	time.Sleep(10 * time.Millisecond)
 
@@ -65,7 +65,7 @@ func main() {
 	}
 
 	// gstate.Hydrate creates a new Actor in exactly the same state.
-	actor2 := gstate.Hydrate(machine, loadedSnapshot)
+	actor2 := gstate.Hydrate(machine, loadedSnapshot, true)
 	fmt.Printf("Hydrated State: %s\n", actor2.State())
 	fmt.Printf("Hydrated Data: %s\n", actor2.Snapshot().Data.Value)
 

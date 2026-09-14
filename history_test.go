@@ -24,7 +24,7 @@ func TestActorHistory(t *testing.T) {
 		}).
 		Build()
 
-	actor := Start(m, Context{})
+	actor := Start(m, Context{}, true)
 
 	// Initial state is s1
 	if actor.State() != "s1" {

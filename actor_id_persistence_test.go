@@ -4,7 +4,7 @@ import "testing"
 
 func TestSnapshotCapturesActorID(t *testing.T) {
 	m := tinyMachine()
-	a := Start(m, Context{})
+	a := Start(m, Context{}, true)
 	defer a.Stop()
 	snap := a.Snapshot()
 	if snap.ActorID != a.ID() {
@@ -17,12 +17,12 @@ func TestSnapshotCapturesActorID(t *testing.T) {
 
 func TestHydrateRestoresActorID(t *testing.T) {
 	m := tinyMachine()
-	a := Start(m, Context{})
+	a := Start(m, Context{}, true)
 	original := a.ID()
 	snap := a.Snapshot()
 	a.Stop()
 
-	revived := Hydrate(m, snap)
+	revived := Hydrate(m, snap, true)
 	defer revived.Stop()
 	if revived.ID() != original {
 		t.Errorf("hydrated ID = %q, want %q", revived.ID(), original)
@@ -31,12 +31,12 @@ func TestHydrateRestoresActorID(t *testing.T) {
 
 func TestHydrateAcceptsObserverOption(t *testing.T) {
 	m := tinyMachine()
-	a := Start(m, Context{})
+	a := Start(m, Context{}, true)
 	snap := a.Snapshot()
 	a.Stop()
 
 	rec := &RecordingObserver[StateID, EventID, Context]{}
-	revived := Hydrate(m, snap, m.WithObservers(rec))
+	revived := Hydrate(m, snap, true, m.WithObservers(rec))
 	defer revived.Stop()
 	if len(revived.transitionObs) == 0 || revived.transitionObs[0] != rec {
 		t.Errorf("observer not installed via Hydrate")
@@ -52,12 +52,12 @@ func TestHydrateDoesNotFireOnStateEntered(t *testing.T) {
 	// could fire observers asynchronously. Any observer call would happen
 	// inline during Hydrate; checking immediately after is deterministic.
 	m := tinyMachine()
-	original := Start(m, Context{})
+	original := Start(m, Context{}, true)
 	snap := original.Snapshot()
 	original.Stop()
 
 	rec := &RecordingObserver[StateID, EventID, Context]{}
-	revived := Hydrate(m, snap, m.WithObservers(rec))
+	revived := Hydrate(m, snap, true, m.WithObservers(rec))
 	defer revived.Stop()
 
 	if got := rec.StateEntered(); len(got) != 0 {
@@ -70,12 +70,12 @@ func TestHydrateDoesNotFireOnStateEntered(t *testing.T) {
 
 func TestHydrateWithActorIDOverridesSnapshot(t *testing.T) {
 	m := tinyMachine()
-	a := Start(m, Context{})
+	a := Start(m, Context{}, true)
 	snap := a.Snapshot()
 	a.Stop()
 
 	override := ActorID("forced-id")
-	revived := Hydrate(m, snap, m.WithActorID(override))
+	revived := Hydrate(m, snap, true, m.WithActorID(override))
 	defer revived.Stop()
 	if revived.ID() != override {
 		t.Errorf("Hydrate WithActorID = %q, want %q", revived.ID(), override)

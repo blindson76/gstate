@@ -36,7 +36,7 @@ func TestSendWithAssignWith(t *testing.T) {
 		}).
 		Build()
 
-	a := Start(m, Context{})
+	a := Start(m, Context{}, true)
 	defer a.Stop()
 
 	a.SendWith("SET", 42)
@@ -83,7 +83,7 @@ func TestSendWithGuardWith(t *testing.T) {
 		}).
 		Build()
 
-	a := Start(m, Context{})
+	a := Start(m, Context{}, true)
 	defer a.Stop()
 
 	// Negative arg: guard should block the transition.
@@ -119,7 +119,7 @@ func TestSendCtxWithPropagatesArgs(t *testing.T) {
 		}).
 		Build()
 
-	a := Start(m, Context{})
+	a := Start(m, Context{}, true)
 	defer a.Stop()
 
 	if err := a.SendCtxWith(context.Background(), "DATA", 99); err != nil {
@@ -139,7 +139,7 @@ func TestSendCtxWithPropagatesArgs(t *testing.T) {
 // TestSendCtxWithCancelledCtx verifies that a cancelled context prevents delivery.
 func TestSendCtxWithCancelledCtx(t *testing.T) {
 	m := tinyMachine()
-	a := Start(m, Context{})
+	a := Start(m, Context{}, true)
 	defer a.Stop()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -154,7 +154,7 @@ func TestSendCtxWithCancelledCtx(t *testing.T) {
 // TestSendCtxWithErrActorStopped verifies the stopped sentinel is returned post-Stop.
 func TestSendCtxWithErrActorStopped(t *testing.T) {
 	m := tinyMachine()
-	a := Start(m, Context{})
+	a := Start(m, Context{}, true)
 	a.Stop()
 
 	err := a.SendCtxWith(context.Background(), "GO", "data")
@@ -175,7 +175,7 @@ func TestSendWithNilArgsFallsThrough(t *testing.T) {
 		}).
 		Build()
 
-	a := Start(m, Context{})
+	a := Start(m, Context{}, true)
 	defer a.Stop()
 
 	a.SendWith("BUMP", nil)

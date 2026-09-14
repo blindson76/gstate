@@ -20,7 +20,7 @@ func TestActorPersistence(t *testing.T) {
 		}).
 		Build()
 
-	actor := Start(m, Context{Count: 0})
+	actor := Start(m, Context{Count: 0}, true)
 
 	actor.Send("START")
 	time.Sleep(10 * time.Millisecond)
@@ -35,7 +35,7 @@ func TestActorPersistence(t *testing.T) {
 	snapshot := actor.Snapshot()
 
 	// Create new actor from snapshot
-	actor2 := Hydrate(m, snapshot)
+	actor2 := Hydrate(m, snapshot, true)
 
 	if actor2.State() != "active" {
 		t.Errorf("Expected hydrated state active, got %s", actor2.State())

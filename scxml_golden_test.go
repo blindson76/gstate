@@ -214,4 +214,3 @@ func TestSCXMLValidatesAgainstW3C(t *testing.T) {
 		}
 	})
 }
-

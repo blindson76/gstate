@@ -32,7 +32,7 @@ func TestSelfTransitionReEntry(t *testing.T) {
 		}).
 		Build()
 
-	actor := Start(machine, Context{})
+	actor := Start(machine, Context{}, true)
 	defer actor.Stop()
 
 	// Initial entry happens synchronously inside Start.
@@ -69,7 +69,7 @@ func TestInfiniteLoopCircuitBreaker(t *testing.T) {
 			}).
 			Build()
 
-		Start(machine, Context{})
+		Start(machine, Context{}, true)
 		// If Start() blocks forever or handleAlwaysInternal loops forever, we won't reach here
 		// Note: Start runs loop in goroutine, but handleAlwaysInternal runs synchronously
 		// during initial entry!

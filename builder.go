@@ -198,10 +198,10 @@ func (s *StateBuilder[S, E, D]) ExitLabel(name string) {
 // Invoke configures an asynchronous service to run during the state's lifecycle.
 //
 // Parameters:
-// - fn: service function receiving ctx, entry snapshot, and mutate callback.
-//   For details on the parameter contracts, see the documentation for InvokeDef.Func.
-// - onDone: state to transition to on success (when fn returns nil).
-// - onError: state to transition to on failure (when fn returns a non-nil error).
+//   - fn: service function receiving ctx, entry snapshot, and mutate callback.
+//     For details on the parameter contracts, see the documentation for InvokeDef.Func.
+//   - onDone: state to transition to on success (when fn returns nil).
+//   - onError: state to transition to on failure (when fn returns a non-nil error).
 func (s *StateBuilder[S, E, D]) Invoke(fn func(ctx context.Context, snap D, mutate func(func(D) D)) error, onDone S, onError S) {
 	s.state.Invoke = &InvokeDef[S, E, D]{
 		Func:    fn,

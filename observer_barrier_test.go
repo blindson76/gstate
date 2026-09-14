@@ -10,7 +10,7 @@ import (
 // time.Sleep with a deterministic synchronisation primitive: tests do
 //
 //	bar := newKindBarrier(KindTransition, 1)
-//	a := Start(m, ctx, m.WithObservers(rec, bar))
+//	a := Start(m, ctx, true, m.WithObservers(rec, bar))
 //	a.Send("GO")
 //	<-bar.done
 //

@@ -371,7 +371,7 @@ When you want to record transitions, guard outcomes, state entries/exits, transi
 
 ```go
 rec := &gstate.RecordingObserver[MyState, MyEvent, MyData]{}
-actor := gstate.Start(machine, MyData{}, machine.WithObservers(rec))
+actor := gstate.Start(machine, MyData{}, true, machine.WithObservers(rec))
 ```
 
 > The `machine.WithObservers(...)` form lets Go infer the `[MyState, MyEvent, MyData]` type parameters from `machine`, so you don't have to repeat them on every option. `WithObservers` is variadic — pass any number of observers and they all receive callbacks for the kinds they implement.
@@ -428,7 +428,7 @@ ready := make(chan struct{}, 1)
 obs := gstate.SignalObserver[MyState, MyEvent, MyData](func() {
     select { case ready <- struct{}{}: default: }
 })
-actor := gstate.Start(machine, ctx, machine.WithObservers(obs))
+actor := gstate.Start(machine, ctx, true, machine.WithObservers(obs))
 actor.Send(EventGo)
 <-ready // deterministically woken by the first lifecycle callback
 ```
@@ -446,7 +446,7 @@ obs := gstate.ObserverFuncs[MyState, MyEvent, MyData]{
         log.Printf("[%s] %s --%s--> %s", e.ActorID, e.From, e.Event, e.To)
     },
 }
-actor := gstate.Start(machine, ctx, machine.WithObservers(obs))
+actor := gstate.Start(machine, ctx, true, machine.WithObservers(obs))
 ```
 
 `ObserverFuncs` is a struct of optional function fields plus a generic `AnyFunc`. Each callback dispatches to `AnyFunc` first (if set), then to the kind-specific field (if set). Nil fields are no-ops. Useful when you want a partial observer without defining a named type, or when one hook should fire for every event in addition to specific typed handlers.
@@ -457,7 +457,7 @@ actor := gstate.Start(machine, ctx, machine.WithObservers(obs))
 
 ```go
 rec := &gstate.RecordingObserver[MyState, MyEvent, MyData]{}
-actor := gstate.Start(machine, MyData{}, machine.WithObservers(rec))
+actor := gstate.Start(machine, MyData{}, true, machine.WithObservers(rec))
 actor.Send(EventGo)
 
 for _, t := range rec.Transitions() {
@@ -502,15 +502,19 @@ A `Machine` is a static blueprint. To actually run it, you create an **Actor**. 
 
 ```go
 // Start with default options
-actor := gstate.Start(machine, MyData{Count: 0})
+actor := gstate.Start(machine, MyData{Count: 0}, true)
 
 // Or with one or more functional options — call them as methods on the
 // machine to let Go infer the [S, E, D] type parameters.
-actor := gstate.Start(machine, MyData{Count: 0},
+actor := gstate.Start(machine, MyData{Count: 0}, true,
     machine.WithMailboxSize(500),
     machine.WithObservers(logger, recorder),
     machine.WithActorID("worker-42"),
 )
+
+// Defer invoke/timer services until later.
+paused := gstate.Start(machine, MyData{Count: 0}, false)
+paused.Activate()
 ```
 
 Available options:
@@ -518,13 +522,16 @@ Available options:
 - `WithMailboxSize(n)` — buffered capacity for the event channel. Default `100`.
 - `WithObservers(obs...)` — install one or more [observers](#12-observing-lifecycle-events). Variadic; pass any number of observers (each implementing whichever narrow callback interfaces it cares about). When omitted, no observer is installed and the engine skips payload construction entirely.
 - `WithActorID(id)` — override the auto-generated [`ActorID`](#actor-identity).
+- `activate` argument (`true`/`false`) — controls whether invoke/timer services start immediately or wait for `Actor.Activate()`.
+
+`activate` affects only invoke/timer services. `Send`/`SendCtx` behavior stays the same, including when `WithRunToCompletion()` is enabled.
 
 ### Actor Identity
 
 Every actor is born with a stable `ActorID`. When you don't supply one via `WithActorID`, `Start` generates a short URL-safe nanoid:
 
 ```go
-actor := gstate.Start(machine, MyData{})
+actor := gstate.Start(machine, MyData{}, true)
 fmt.Println(actor.ID()) // e.g. "V1StGXR8_Z5j"
 ```
 
@@ -638,7 +645,7 @@ data, _ := json.MarshalIndent(snapshot, "", "  ")
 var loaded gstate.Snapshot[MyState, MyData]
 json.Unmarshal(data, &loaded)
 
-actor2 := gstate.Hydrate(machine, loaded)
+actor2 := gstate.Hydrate(machine, loaded, true)
 // actor2 is now in exactly the same state as the original
 ```
 
@@ -648,7 +655,7 @@ A `Snapshot` contains:
 - **`Data D`** — the user data
 - **`ActorID ActorID`** — the producing actor's stable identifier
 
-`Hydrate` restores the actor state and restarts any background services (invocations and timers) for active states, without re-executing entry actions. The hydrated actor keeps the original `ActorID` from the snapshot.
+`Hydrate` restores the actor state and restarts any background services (invocations and timers) for active states when `activate` is `true`, without re-executing entry actions. The hydrated actor keeps the original `ActorID` from the snapshot.
 
 `Hydrate` does **not** fire `OnStateEntered` or `OnTransition` for the states being restored — those events represent the original state changes that were already observed before the snapshot was captured. Hooks resume firing on the next event, Always evaluation, or invoke completion processed by the hydrated actor.
 
@@ -657,6 +664,7 @@ A `Snapshot` contains:
 ```go
 rec := &gstate.RecordingObserver[MyState, MyEvent, MyData]{}
 actor := gstate.Hydrate(machine, loaded,
+    true,
     machine.WithObservers(rec),
     machine.WithMailboxSize(500),
 )

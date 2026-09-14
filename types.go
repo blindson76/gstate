@@ -163,4 +163,3 @@ type Snapshot[S ~string, D Cloner[D]] struct {
 	// [Hydrate] restores it so telemetry correlation survives serialization.
 	ActorID ActorID `json:"actor_id,omitempty"`
 }
-

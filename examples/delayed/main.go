@@ -40,11 +40,11 @@ func main() {
 		Build()
 
 	fmt.Println("--- Test Case 1: Reaching the Timeout ---")
-	gstate.Start(machine, MyData{})
+	gstate.Start(machine, MyData{}, true)
 	time.Sleep(150 * time.Millisecond) // Let it time out
 
 	fmt.Println("\n--- Test Case 2: Escaping before Timeout ---")
-	actor2 := gstate.Start(machine, MyData{})
+	actor2 := gstate.Start(machine, MyData{}, true)
 	time.Sleep(20 * time.Millisecond) // Wait a tiny bit
 
 	fmt.Println("Action: Sending 'USER_ACTION' before 100ms is up...")

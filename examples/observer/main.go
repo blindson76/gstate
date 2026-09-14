@@ -74,7 +74,7 @@ func main() {
 	logger := &loggingObserver{}
 	rec := &gstate.RecordingObserver[State, Event, Data]{}
 
-	actor := gstate.Start(machine, Data{},
+	actor := gstate.Start(machine, Data{}, true,
 		machine.WithObservers(logger, rec),
 	)
 	defer actor.Stop()

@@ -14,7 +14,7 @@ func TestMachineOptionsInferTypeParams(t *testing.T) {
 	m := tinyMachine()
 	rec := &RecordingObserver[StateID, EventID, Context]{}
 
-	a := Start(m, Context{},
+	a := Start(m, Context{}, true,
 		m.WithMailboxSize(7),
 		m.WithObservers(rec),
 		m.WithActorID("worker-id"),
@@ -40,7 +40,7 @@ func TestMachineOptionsBlockReceivedSignal(t *testing.T) {
 	m := tinyMachine()
 	barrier := &transitionBarrier{ch: make(chan struct{}, 1)}
 
-	a := Start(m, Context{}, m.WithObservers(barrier))
+	a := Start(m, Context{}, true, m.WithObservers(barrier))
 	defer a.Stop()
 	a.Send("GO")
 

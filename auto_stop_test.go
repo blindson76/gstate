@@ -25,7 +25,7 @@ func finalMachine() *Machine[StateID, EventID, Context] {
 // TestAutoStopOnAtomicTopLevelFinal asserts that when the actor lands
 // on a top-level state whose Type is Final, it stops itself.
 func TestAutoStopOnAtomicTopLevelFinal(t *testing.T) {
-	a := Start(finalMachine(), Context{})
+	a := Start(finalMachine(), Context{}, true)
 	defer a.Stop() // idempotent safety net
 
 	if err := a.SendCtx(context.Background(), "FINISH"); err != nil {
@@ -73,7 +73,7 @@ func TestAutoStopOnCompoundRootReachingFinalChild(t *testing.T) {
 		}).
 		Build()
 
-	a := Start(m, Context{})
+	a := Start(m, Context{}, true)
 	defer a.Stop()
 
 	if err := a.SendCtx(context.Background(), "FINISH"); err != nil {
@@ -105,7 +105,7 @@ func TestAutoStopOnNestedFinal(t *testing.T) {
 		}).
 		Build()
 
-	a := Start(m, Context{})
+	a := Start(m, Context{}, true)
 	defer a.Stop()
 
 	if err := a.SendCtx(context.Background(), "FINISH"); err != nil {
@@ -143,7 +143,7 @@ func TestAutoStopOnParallelAllRegionsDone(t *testing.T) {
 		}).
 		Build()
 
-	a := Start(m, Context{})
+	a := Start(m, Context{}, true)
 	defer a.Stop()
 
 	// Finish region A; actor should NOT yet be stopped (region B is
@@ -195,7 +195,7 @@ func TestAutoStopDoesNotFireForParallelPartialDone(t *testing.T) {
 		Build()
 
 	dropBar := newKindBarrier(KindEventDropped, 1)
-	a := Start(m, Context{}, m.WithObservers(dropBar))
+	a := Start(m, Context{}, true, m.WithObservers(dropBar))
 	defer a.Stop()
 
 	// FINISH_A drives regionA to Final; regionB still in b_active.
@@ -240,7 +240,7 @@ func TestAutoStopDoesNotFireForCompoundWithNonFinalActiveChild(t *testing.T) {
 	// Send a NOOP and confirm it's dropped — proves the loop is alive
 	// at Start (no auto-stop happened during initial-chain entry).
 	dropBar := newKindBarrier(KindEventDropped, 1)
-	a := Start(m, Context{}, m.WithObservers(dropBar))
+	a := Start(m, Context{}, true, m.WithObservers(dropBar))
 	defer a.Stop()
 
 	if err := a.SendCtx(context.Background(), "NOOP"); err != nil {
@@ -262,7 +262,7 @@ func TestAutoStopDoesNotFireForCompoundWithNonFinalActiveChild(t *testing.T) {
 func TestAutoStopDoesNotFireForMachineWithoutFinal(t *testing.T) {
 	dropBar := newKindBarrier(KindEventDropped, 1)
 	m := tinyMachine()
-	a := Start(m, Context{}, m.WithObservers(dropBar))
+	a := Start(m, Context{}, true, m.WithObservers(dropBar))
 	defer a.Stop()
 
 	// Transition a -> b, then NOOP (no transition matches in b).
@@ -292,7 +292,7 @@ func TestAutoStopOnInitialChain(t *testing.T) {
 		}).
 		Build()
 
-	a := Start(m, Context{})
+	a := Start(m, Context{}, true)
 	defer a.Stop()
 
 	<-a.stopped // auto-stop must have fired from inside Start
@@ -309,7 +309,7 @@ func TestAutoStopOnInitialChain(t *testing.T) {
 func TestAutoStopNoGoroutineLeak(t *testing.T) {
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
-	a := Start(finalMachine(), Context{})
+	a := Start(finalMachine(), Context{}, true)
 	if err := a.SendCtx(context.Background(), "FINISH"); err != nil {
 		t.Fatalf("SendCtx err = %v", err)
 	}
@@ -327,7 +327,7 @@ func TestAutoStopNoGoroutineLeak(t *testing.T) {
 // the terminal state.
 func TestAutoStopObserverSeesTerminalState(t *testing.T) {
 	rec := &RecordingObserver[StateID, EventID, Context]{}
-	a := Start(finalMachine(), Context{}, finalMachine().WithObservers(rec))
+	a := Start(finalMachine(), Context{}, true, finalMachine().WithObservers(rec))
 	defer a.Stop()
 
 	if err := a.SendCtx(context.Background(), "FINISH"); err != nil {
@@ -359,7 +359,7 @@ func TestAutoStopOnHydratedFinal(t *testing.T) {
 		ActorID: "hydrated-final",
 	}
 
-	a := Hydrate(m, snap)
+	a := Hydrate(m, snap, true)
 	defer a.Stop()
 
 	<-a.stopped // auto-stop must have fired from inside Hydrate

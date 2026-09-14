@@ -95,7 +95,7 @@ func main() {
 		Build()
 
 	fmt.Println("--- Starting Agent Actor ---")
-	actor := gstate.Start(machine, MyData{RepoDir: "./workspace"})
+	actor := gstate.Start(machine, MyData{RepoDir: "./workspace"}, true)
 
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()

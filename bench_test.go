@@ -116,7 +116,7 @@ func waitForTransitions(b *testing.B, m *Machine[benchState, benchEvent, benchCt
 	all = append(all, extraObservers...)
 	opts := []Option[benchState, benchEvent, benchCtx]{m.WithObservers(all...)}
 
-	actor := Start(m, benchCtx{}, opts...)
+	actor := Start(m, benchCtx{}, true, opts...)
 
 	for i := 0; i < n; i++ {
 		if i%2 == 0 {
@@ -140,7 +140,7 @@ func BenchmarkSendTransition_TrulyNoObserver(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		actor := Start(m, benchCtx{})
+		actor := Start(m, benchCtx{}, true)
 		for j := 0; j < 100; j++ {
 			if j%2 == 0 {
 				actor.Send(bEVPong)
@@ -180,7 +180,6 @@ func BenchmarkSendTransition_ThreeTransitionObservers(b *testing.B) {
 		waitForTransitions(b, m, 100, obs1, obs2)
 	}
 }
-
 
 func BenchmarkSendTransition_RecordingObserver(b *testing.B) {
 	m := pingPongMachine()
@@ -262,7 +261,7 @@ func BenchmarkContextSnapshot_Cloner(b *testing.B) {
 		done = make(chan struct{})
 		mu.Unlock()
 
-		actor := Start(m, benchCloneCtx{}, m.WithObservers(waiter))
+		actor := Start(m, benchCloneCtx{}, true, m.WithObservers(waiter))
 		for j := 0; j < 100; j++ {
 			if j%2 == 0 {
 				actor.Send(bEVPong)
@@ -386,7 +385,7 @@ func benchHierarchy(b *testing.B, m *Machine[benchState, benchEvent, benchCtx]) 
 		},
 	}
 
-	actor := Start(m, benchCtx{}, m.WithObservers(waiter))
+	actor := Start(m, benchCtx{}, true, m.WithObservers(waiter))
 	for i := 0; i < n; i++ {
 		if i%2 == 0 {
 			actor.Send(swapEv)
@@ -470,7 +469,7 @@ func benchParallel(b *testing.B, m *Machine[benchState, benchEvent, benchCtx]) {
 		},
 	}
 
-	actor := Start(m, benchCtx{}, m.WithObservers(waiter))
+	actor := Start(m, benchCtx{}, true, m.WithObservers(waiter))
 	for i := 0; i < n; i++ {
 		if i%2 == 0 {
 			actor.Send(goEv)
@@ -565,7 +564,7 @@ func benchAlwaysChain(b *testing.B, m *Machine[benchState, benchEvent, benchCtx]
 		},
 	}
 
-	actor := Start(m, benchCtx{}, m.WithObservers(waiter))
+	actor := Start(m, benchCtx{}, true, m.WithObservers(waiter))
 	for r := 0; r < rounds; r++ {
 		actor.Send(goEv)
 		actor.Send(resetEv)
@@ -623,7 +622,7 @@ func BenchmarkInvokeStartCancel(b *testing.B) {
 			},
 		}
 
-		actor := Start(m, benchCtx{}, m.WithObservers(waiter))
+		actor := Start(m, benchCtx{}, true, m.WithObservers(waiter))
 		for r := 0; r < rounds; r++ {
 			actor.Send(startEv)
 			actor.Send(cancelEv)
@@ -636,7 +635,7 @@ func BenchmarkInvokeStartCancel(b *testing.B) {
 func BenchmarkSnapshot(b *testing.B) {
 	b.Run("simple", func(b *testing.B) {
 		m := pingPongMachine()
-		actor := Start(m, benchCtx{Count: 42})
+		actor := Start(m, benchCtx{Count: 42}, true)
 		defer actor.Stop()
 
 		b.ReportAllocs()
@@ -658,7 +657,7 @@ func BenchmarkSnapshot(b *testing.B) {
 				}
 			},
 		}
-		actor := Start(m, benchCtx{Count: 42}, m.WithObservers(waiter))
+		actor := Start(m, benchCtx{Count: 42}, true, m.WithObservers(waiter))
 		actor.Send("GO")
 		<-ch
 
@@ -674,14 +673,14 @@ func BenchmarkSnapshot(b *testing.B) {
 func BenchmarkHydrate(b *testing.B) {
 	b.Run("simple", func(b *testing.B) {
 		m := pingPongMachine()
-		actor := Start(m, benchCtx{Count: 42})
+		actor := Start(m, benchCtx{Count: 42}, true)
 		snap := actor.Snapshot()
 		actor.Stop()
 
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			a := Hydrate(m, snap)
+			a := Hydrate(m, snap, true)
 			a.Stop()
 		}
 	})
@@ -698,7 +697,7 @@ func BenchmarkHydrate(b *testing.B) {
 				}
 			},
 		}
-		actor := Start(m, benchCtx{Count: 42}, m.WithObservers(waiter))
+		actor := Start(m, benchCtx{Count: 42}, true, m.WithObservers(waiter))
 		actor.Send("GO")
 		<-ch
 		snap := actor.Snapshot()
@@ -707,7 +706,7 @@ func BenchmarkHydrate(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			a := Hydrate(m, snap)
+			a := Hydrate(m, snap, true)
 			a.Stop()
 		}
 	})
@@ -724,7 +723,7 @@ func BenchmarkSendTransition_ZeroAlloc(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		actor := Start(m, benchCtx{})
+		actor := Start(m, benchCtx{}, true)
 		for j := 0; j < 100; j++ {
 			if j%2 == 0 {
 				actor.Send(bEVPong)
@@ -745,7 +744,7 @@ func TestSendTransition_ZeroAllocCheck(t *testing.T) {
 	m := pingPongMachine()
 
 	// Pre-warm: start an actor, send one event, stop it.
-	actor := Start(m, benchCtx{})
+	actor := Start(m, benchCtx{}, true)
 	actor.Send(bEVPong)
 	time.Sleep(10 * time.Millisecond)
 	actor.Stop()
@@ -754,7 +753,7 @@ func TestSendTransition_ZeroAllocCheck(t *testing.T) {
 	// so Send itself just enqueues to a buffered channel. The allocation
 	// check is on the Send path (mailbox enqueue), not the processing.
 	allocs := testing.AllocsPerRun(100, func() {
-		actor := Start(m, benchCtx{})
+		actor := Start(m, benchCtx{}, true)
 		actor.Send(bEVPong)
 		actor.Send(bEVPing)
 		// We can't easily wait for processing without an observer,

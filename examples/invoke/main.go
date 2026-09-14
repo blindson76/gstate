@@ -52,13 +52,13 @@ func main() {
 
 	fmt.Println("--- Test Case 1: Completion ---")
 	// Let the service finish naturally.
-	actor1 := gstate.Start(machine, MyData{})
+	actor1 := gstate.Start(machine, MyData{}, true)
 	time.Sleep(150 * time.Millisecond)
 	fmt.Printf("Final State: %s\n", actor1.State())
 
 	fmt.Println("\n--- Test Case 2: Cancellation ---")
 	// Interrupt the service by sending an event to change states.
-	actor2 := gstate.Start(machine, MyData{})
+	actor2 := gstate.Start(machine, MyData{}, true)
 	time.Sleep(20 * time.Millisecond)
 
 	fmt.Println("Action: Sending CANCEL event...")

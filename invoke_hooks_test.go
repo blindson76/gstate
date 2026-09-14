@@ -25,7 +25,7 @@ func TestInvokeStartedAndCompletedSuccess(t *testing.T) {
 		State("fail", func(s *StateBuilder[StateID, EventID, Context]) { s.Type(Final) }).
 		Build()
 
-	a := Start(m, Context{}, m.WithObservers(rec, bar))
+	a := Start(m, Context{}, true, m.WithObservers(rec, bar))
 	defer a.Stop()
 
 	<-srcStart        // Src is running
@@ -63,7 +63,7 @@ func TestInvokeCompletedOnError(t *testing.T) {
 		State("fail", func(s *StateBuilder[StateID, EventID, Context]) { s.Type(Final) }).
 		Build()
 
-	a := Start(m, Context{}, m.WithObservers(rec, bar))
+	a := Start(m, Context{}, true, m.WithObservers(rec, bar))
 	defer a.Stop()
 
 	<-bar.done
@@ -118,7 +118,7 @@ func TestInvokeHooksPropagateSendCtx(t *testing.T) {
 		State("fail", func(s *StateBuilder[StateID, EventID, Context]) { s.Type(Final) }).
 		Build()
 
-	a := Start(m, Context{}, m.WithObservers(cap))
+	a := Start(m, Context{}, true, m.WithObservers(cap))
 	defer a.Stop()
 
 	type key struct{}
@@ -154,7 +154,7 @@ func TestInvokeCompletedOnCancellation(t *testing.T) {
 		State("fail", func(s *StateBuilder[StateID, EventID, Context]) { s.Type(Final) }).
 		Build()
 
-	a := Start(m, Context{}, m.WithObservers(rec, startedBar, completedBar))
+	a := Start(m, Context{}, true, m.WithObservers(rec, startedBar, completedBar))
 	defer a.Stop()
 
 	<-startedBar.done
@@ -192,7 +192,7 @@ func TestInvokeDoneCanAlwaysTransitionIntoAnotherInvoke(t *testing.T) {
 		State("failed", func(s *StateBuilder[StateID, EventID, Context]) { s.Type(Final) }).
 		Build()
 
-	a := Start(m, Context{})
+	a := Start(m, Context{}, true)
 	defer a.Stop()
 
 	select {

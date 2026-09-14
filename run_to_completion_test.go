@@ -10,7 +10,7 @@ import (
 // Always chains) before returning, so no external synchronisation is needed.
 func TestRunToCompletion_SendIsSynchronous(t *testing.T) {
 	m := tinyMachine()
-	a := Start(m, Context{}, m.WithRunToCompletion())
+	a := Start(m, Context{}, true, m.WithRunToCompletion())
 	defer a.Stop()
 
 	if got := a.State(); got != "a" {
@@ -29,7 +29,7 @@ func TestRunToCompletion_SendIsSynchronous(t *testing.T) {
 // causes SendCtx to return ctx.Err() without delivering the event.
 func TestRunToCompletion_SendCtxCancelled(t *testing.T) {
 	m := tinyMachine()
-	a := Start(m, Context{}, m.WithRunToCompletion())
+	a := Start(m, Context{}, true, m.WithRunToCompletion())
 	defer a.Stop()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -49,7 +49,7 @@ func TestRunToCompletion_SendCtxCancelled(t *testing.T) {
 // ErrActorStopped after the actor has been stopped.
 func TestRunToCompletion_StoppedReturnsError(t *testing.T) {
 	m := tinyMachine()
-	a := Start(m, Context{}, m.WithRunToCompletion())
+	a := Start(m, Context{}, true, m.WithRunToCompletion())
 	a.Stop()
 
 	err := a.SendCtx(context.Background(), "GO")
@@ -74,7 +74,7 @@ func TestRunToCompletion_AlwaysTransitionsRunInline(t *testing.T) {
 		State("end", func(_ *StateBuilder[StateID, EventID, Context]) {}).
 		Build()
 
-	a := Start(m, Context{}, m.WithRunToCompletion())
+	a := Start(m, Context{}, true, m.WithRunToCompletion())
 	defer a.Stop()
 
 	a.Send("STEP")
@@ -89,7 +89,7 @@ func TestRunToCompletion_AlwaysTransitionsRunInline(t *testing.T) {
 // for the SendWith / SendCtxWith variants.
 func TestRunToCompletion_SendWithIsSynchronous(t *testing.T) {
 	m := tinyMachine()
-	a := Start(m, Context{}, m.WithRunToCompletion())
+	a := Start(m, Context{}, true, m.WithRunToCompletion())
 	defer a.Stop()
 
 	a.SendWith("GO", nil)
@@ -111,7 +111,7 @@ func TestRunToCompletion_ObserversFireSynchronously(t *testing.T) {
 		},
 	}
 
-	a := Start(m, Context{}, m.WithRunToCompletion(), m.WithObservers(obs))
+	a := Start(m, Context{}, true, m.WithRunToCompletion(), m.WithObservers(obs))
 	defer a.Stop()
 
 	a.Send("GO")

@@ -20,7 +20,7 @@ func TestWithObserversFansOutToAllMembers(t *testing.T) {
 
 	m := tinyMachine()
 	barrier := newKindBarrier(KindTransition, 1)
-	actor := Start(m, Context{}, m.WithObservers(a, b, barrier))
+	actor := Start(m, Context{}, true, m.WithObservers(a, b, barrier))
 	defer actor.Stop()
 
 	actor.Send("GO")
@@ -39,7 +39,7 @@ func TestWithObserversPreservesOrder(t *testing.T) {
 
 	m := tinyMachine()
 	barrier := newKindBarrier(KindTransition, 1)
-	actor := Start(m, Context{}, m.WithObservers(makeRecorder(1), makeRecorder(2), makeRecorder(3), barrier))
+	actor := Start(m, Context{}, true, m.WithObservers(makeRecorder(1), makeRecorder(2), makeRecorder(3), barrier))
 	defer actor.Stop()
 
 	actor.Send("GO")

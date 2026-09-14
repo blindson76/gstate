@@ -63,7 +63,7 @@ func main() {
 		Build()
 
 	fmt.Println("--- Starting Actor ---")
-	actor := gstate.Start(machine, MyData{Count: 0})
+	actor := gstate.Start(machine, MyData{Count: 0}, true)
 
 	// 4. Send Events using constants
 	actor.Send(EventIncrement)
