@@ -19,7 +19,7 @@ func TestSignalObserverFiresOnEachCallback(t *testing.T) {
 	bar := newKindBarrier(KindTransition, 1)
 
 	m := guardedMachine(true)
-	a := Start(m, Context{}, m.WithObservers(sig, rec, bar))
+	a := Start(m, Context{}, true, m.WithObservers(sig, rec, bar))
 	defer a.Stop()
 
 	a.Send("GO")
@@ -38,7 +38,7 @@ func TestSignalObserverNilSignalIsNoOp(t *testing.T) {
 	bar := newKindBarrier(KindTransition, 1)
 
 	m := guardedMachine(true)
-	a := Start(m, Context{}, m.WithObservers(sig, bar))
+	a := Start(m, Context{}, true, m.WithObservers(sig, bar))
 	defer a.Stop()
 
 	a.Send("GO")
@@ -59,7 +59,7 @@ func TestSignalObserverWakesChannelDeterministically(t *testing.T) {
 	})
 
 	m := tinyMachine()
-	a := Start(m, Context{}, m.WithObservers(sig))
+	a := Start(m, Context{}, true, m.WithObservers(sig))
 	defer a.Stop()
 
 	// Start itself fires OnStateEntered, so ready is already pending.

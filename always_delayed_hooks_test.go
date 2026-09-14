@@ -17,7 +17,7 @@ func TestAlwaysTransitionEmitsObserverCalls(t *testing.T) {
 		Build()
 
 	bar := newKindBarrier(KindTransition, 1)
-	a := Start(m, Context{}, m.WithObservers(rec, bar))
+	a := Start(m, Context{}, true, m.WithObservers(rec, bar))
 	defer a.Stop()
 
 	<-bar.done
@@ -67,7 +67,7 @@ func TestDelayedTransitionFiresWithBackgroundContext(t *testing.T) {
 		State("b", func(_ *StateBuilder[StateID, EventID, Context]) {}).
 		Build()
 
-	a := Start(m, Context{}, m.WithObservers(cap))
+	a := Start(m, Context{}, true, m.WithObservers(cap))
 	defer a.Stop()
 
 	select {
@@ -100,7 +100,7 @@ func TestAlwaysChainedAfterEventReusesSendCtx(t *testing.T) {
 		State("b", func(_ *StateBuilder[StateID, EventID, Context]) {}).
 		Build()
 
-	a := Start(m, Context{}, m.WithObservers(cap))
+	a := Start(m, Context{}, true, m.WithObservers(cap))
 	defer a.Stop()
 
 	type key struct{}

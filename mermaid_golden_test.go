@@ -137,4 +137,3 @@ func labelsGoldenMachine() *Machine[string, string, goldenCtx] {
 		}).
 		Build()
 }
-

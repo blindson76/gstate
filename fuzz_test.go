@@ -60,7 +60,7 @@ func FuzzHydrate(f *testing.F) {
 	// Seed with a few legitimate snapshots produced by a live actor,
 	// plus an obviously-broken one.
 	m := fuzzMachine()
-	a := Start(m, Context{Count: 0})
+	a := Start(m, Context{Count: 0}, true)
 	good, _ := json.Marshal(a.Snapshot())
 	a.Stop()
 
@@ -85,7 +85,7 @@ func FuzzHydrate(f *testing.F) {
 			// Unmarshal failures are fine; we only care about Hydrate.
 			return
 		}
-		a := Hydrate(m, snap)
+		a := Hydrate(m, snap, true)
 		defer a.Stop()
 		_ = a.SendCtx(context.Background(), "START")
 		_ = a.SendCtx(context.Background(), "DONE")
@@ -206,10 +206,10 @@ func FuzzBuilder(f *testing.F) {
 func FuzzEventSequence(f *testing.F) {
 	pool := []EventID{"START", "DONE", "FAIL", "STOP", "BOGUS"}
 
-	f.Add([]byte{0, 1, 3, 0})         // START DONE STOP START
-	f.Add([]byte{0, 1, 2})            // START DONE FAIL (hits Final)
-	f.Add([]byte{0xff, 0xff, 0xff})   // garbage indices
-	f.Add([]byte{4, 4, 4, 4})         // all BOGUS — should be dropped
+	f.Add([]byte{0, 1, 3, 0})       // START DONE STOP START
+	f.Add([]byte{0, 1, 2})          // START DONE FAIL (hits Final)
+	f.Add([]byte{0xff, 0xff, 0xff}) // garbage indices
+	f.Add([]byte{4, 4, 4, 4})       // all BOGUS — should be dropped
 
 	m := fuzzMachine()
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -218,7 +218,7 @@ func FuzzEventSequence(f *testing.F) {
 		}
 
 		rec := &RecordingObserver[StateID, EventID, Context]{}
-		a := Start(m, Context{}, m.WithObservers(rec))
+		a := Start(m, Context{}, true, m.WithObservers(rec))
 		defer a.Stop()
 
 		// SendCtx with a short timeout so a wedged mailbox doesn't hang

@@ -31,7 +31,7 @@ func TestActorParallel(t *testing.T) {
 		}).
 		Build()
 
-	actor := Start(m, Context{})
+	actor := Start(m, Context{}, true)
 
 	// Should be in {s1, s3}
 	states := actor.States()

@@ -27,7 +27,7 @@ func TestLifecycleHooksHappyPathOrder(t *testing.T) {
 	rec := &RecordingObserver[StateID, EventID, Context]{}
 	bar := newKindBarrier(KindTransition, 1)
 	m := guardedMachine(true)
-	a := Start(m, Context{}, m.WithObservers(rec, bar))
+	a := Start(m, Context{}, true, m.WithObservers(rec, bar))
 	defer a.Stop()
 
 	a.Send("GO")
@@ -95,7 +95,7 @@ func TestGuardFailEmitsFalseAndDoesNotTransition(t *testing.T) {
 	rec := &RecordingObserver[StateID, EventID, Context]{}
 	bar := newKindBarrier(KindEventDropped, 1)
 	m := guardedMachine(false)
-	a := Start(m, Context{}, m.WithObservers(rec, bar))
+	a := Start(m, Context{}, true, m.WithObservers(rec, bar))
 	defer a.Stop()
 
 	a.Send("GO")
@@ -116,7 +116,7 @@ func TestEventDroppedOnUnknownEvent(t *testing.T) {
 	rec := &RecordingObserver[StateID, EventID, Context]{}
 	bar := newKindBarrier(KindEventDropped, 1)
 	m := guardedMachine(true)
-	a := Start(m, Context{}, m.WithObservers(rec, bar))
+	a := Start(m, Context{}, true, m.WithObservers(rec, bar))
 	defer a.Stop()
 
 	a.Send("UNKNOWN")

@@ -50,7 +50,7 @@ func ExampleRecordingObserver() {
 	rec := &gstate.RecordingObserver[myState, myEvent, myCtx]{}
 	bar := &transitionBarrier{done: make(chan struct{}, 1)}
 	m := buildExampleMachine()
-	a := gstate.Start(m, myCtx{},
+	a := gstate.Start(m, myCtx{}, true,
 		m.WithObservers(rec, bar),
 	)
 	defer a.Stop()
@@ -88,7 +88,7 @@ func (l *loggingObserver) OnTransition(_ context.Context, e *gstate.TransitionEv
 func ExampleObserver() {
 	obs := &loggingObserver{lines: make(chan string, 4)}
 	m := buildExampleMachine()
-	a := gstate.Start(m, myCtx{}, m.WithObservers(obs))
+	a := gstate.Start(m, myCtx{}, true, m.WithObservers(obs))
 	defer a.Stop()
 
 	a.Send("GO")

@@ -46,7 +46,7 @@ func main() {
 		Build()
 
 	fmt.Println("--- Starting Actor ---")
-	actor := gstate.Start(machine, MyData{})
+	actor := gstate.Start(machine, MyData{}, true)
 	fmt.Printf("Initial: %s\n", actor.State())
 
 	fmt.Println("\n--- Switching Screen to screen2 ---")

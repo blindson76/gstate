@@ -75,7 +75,7 @@ func TestNoObserver_ZeroClones(t *testing.T) {
 	m := createLazyTestMachine()
 
 	bar := &testTransitionBarrier{done: make(chan struct{})}
-	a := Start(m, initial, m.WithObservers(bar))
+	a := Start(m, initial, true, m.WithObservers(bar))
 	defer a.Stop()
 
 	a.Send("GO")
@@ -93,7 +93,7 @@ func TestObserverNoDataCall_ZeroClones(t *testing.T) {
 
 	obs := noopTransitionObserver{}
 	bar := &testTransitionBarrier{done: make(chan struct{})}
-	a := Start(m, initial, m.WithObservers(obs, bar))
+	a := Start(m, initial, true, m.WithObservers(obs, bar))
 	defer a.Stop()
 
 	a.Send("GO")
@@ -111,7 +111,7 @@ func TestObserverDataCallOnce_OneClone(t *testing.T) {
 
 	obs := &dataCallingObserver{calls: 1}
 	bar := &testTransitionBarrier{done: make(chan struct{})}
-	a := Start(m, initial, m.WithObservers(obs, bar))
+	a := Start(m, initial, true, m.WithObservers(obs, bar))
 	defer a.Stop()
 
 	a.Send("GO")
@@ -129,7 +129,7 @@ func TestObserverDataCallMultiple_OneClone(t *testing.T) {
 
 	obs := &dataCallingObserver{calls: 3}
 	bar := &testTransitionBarrier{done: make(chan struct{})}
-	a := Start(m, initial, m.WithObservers(obs, bar))
+	a := Start(m, initial, true, m.WithObservers(obs, bar))
 	defer a.Stop()
 
 	a.Send("GO")
@@ -149,7 +149,7 @@ func TestMultipleObserversSharedDataCall_OneClone(t *testing.T) {
 	obs1 := &dataCallingObserver{calls: 1}
 	obs2 := &dataCallingObserver{calls: 2}
 	bar := &testTransitionBarrier{done: make(chan struct{})}
-	a := Start(m, initial, m.WithObservers(obs1, obs2, bar))
+	a := Start(m, initial, true, m.WithObservers(obs1, obs2, bar))
 	defer a.Stop()
 
 	a.Send("GO")
@@ -168,7 +168,7 @@ func TestRecordingObserver_MaterializedData(t *testing.T) {
 
 	rec := &RecordingObserver[lState, lEvent, countingCloner]{}
 	bar := &testTransitionBarrier{done: make(chan struct{})}
-	a := Start(m, initial, m.WithObservers(rec, bar))
+	a := Start(m, initial, true, m.WithObservers(rec, bar))
 	defer a.Stop()
 
 	a.Send("GO")
@@ -195,7 +195,7 @@ func TestWithObservers_Filtering(t *testing.T) {
 	obs1 := &dataCallingObserver{calls: 1}
 	obs2 := &dummyGuardObserver{}
 
-	a := Start(m, countingCloner{Count: 42}, m.WithObservers(obs1, obs2))
+	a := Start(m, countingCloner{Count: 42}, true, m.WithObservers(obs1, obs2))
 	defer a.Stop()
 
 	a.Send("GO")

@@ -16,7 +16,7 @@ func TestActorBasic(t *testing.T) {
 		}).
 		Build()
 
-	actor := Start(m, Context{Count: 0})
+	actor := Start(m, Context{Count: 0}, true)
 
 	if actor.State() != "idle" {
 		t.Errorf("Expected initial state 'idle', got %s", actor.State())

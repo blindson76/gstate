@@ -34,7 +34,7 @@ func TestClonerSupport(t *testing.T) {
 		Build()
 
 	initial := &CloneCtx{Value: 0, Data: []int{0}}
-	actor := Start(machine, initial)
+	actor := Start(machine, initial, true)
 
 	actor.Send("INC")
 	// wait for process using a loop that checks the value

@@ -31,7 +31,7 @@ func TestStopWaitsForInvokeGoroutine(t *testing.T) {
 		State("err", func(s *StateBuilder[StateID, EventID, Context]) { s.Type(Final) }).
 		Build()
 
-	a := Start(m, Context{})
+	a := Start(m, Context{}, true)
 	<-started // wait for the invoke Src to actually be running
 
 	a.Stop()
@@ -51,7 +51,7 @@ func TestStopWaitsForInvokeGoroutine(t *testing.T) {
 func TestSendAfterStopIsNoOp(t *testing.T) {
 	m := tinyMachine()
 	rec := &RecordingObserver[StateID, EventID, Context]{}
-	a := Start(m, Context{}, m.WithObservers(rec))
+	a := Start(m, Context{}, true, m.WithObservers(rec))
 
 	a.Stop()
 	rec.Reset() // discard any events the loop processed before Stop
@@ -72,7 +72,7 @@ func TestSendAfterStopIsNoOp(t *testing.T) {
 // Run with -race to also catch any data races introduced by the change.
 func TestConcurrentSendDuringStop(t *testing.T) {
 	m := tinyMachine()
-	a := Start(m, Context{})
+	a := Start(m, Context{}, true)
 
 	const senders = 50
 	const eventsPerSender = 200
@@ -121,7 +121,7 @@ func TestStopWaitsForInFlightTransitionAction(t *testing.T) {
 		State("b", func(_ *StateBuilder[StateID, EventID, Context]) {}).
 		Build()
 
-	a := Start(m, Context{})
+	a := Start(m, Context{}, true)
 
 	a.Send("GO")
 	<-actionStarted // loop goroutine is inside handleEvent, holding mu
@@ -175,7 +175,7 @@ func TestNoGoroutineLeakAfterStop(t *testing.T) {
 		State("err", func(s *StateBuilder[StateID, EventID, Context]) { s.Type(Final) }).
 		Build()
 
-	a := Start(m, Context{})
+	a := Start(m, Context{}, true)
 	<-started
 
 	a.Stop()

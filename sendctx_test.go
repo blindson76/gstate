@@ -23,7 +23,7 @@ func (c *ctxRecorder) OnEventReceived(ctx context.Context, _ *EventNotice[StateI
 func TestSendCtxPropagatesContext(t *testing.T) {
 	m := tinyMachine()
 	rec := &ctxRecorder{got: make(chan context.Context, 1)}
-	a := Start(m, Context{}, m.WithObservers(rec))
+	a := Start(m, Context{}, true, m.WithObservers(rec))
 	defer a.Stop()
 
 	type key struct{}
@@ -46,7 +46,7 @@ func TestSendCtxPropagatesContext(t *testing.T) {
 func TestSendCtxReturnsCtxErrWhenCancelled(t *testing.T) {
 	m := tinyMachine()
 	rec := &RecordingObserver[StateID, EventID, Context]{}
-	a := Start(m, Context{}, m.WithObservers(rec))
+	a := Start(m, Context{}, true, m.WithObservers(rec))
 	defer a.Stop()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -66,7 +66,7 @@ func TestSendCtxReturnsCtxErrWhenCancelled(t *testing.T) {
 func TestSendCtxReturnsNilOnSuccess(t *testing.T) {
 	m := tinyMachine()
 	rec := &ctxRecorder{got: make(chan context.Context, 1)}
-	a := Start(m, Context{}, m.WithObservers(rec))
+	a := Start(m, Context{}, true, m.WithObservers(rec))
 	defer a.Stop()
 
 	if err := a.SendCtx(context.Background(), "GO"); err != nil {
@@ -85,7 +85,7 @@ func TestSendCtxReturnsNilOnSuccess(t *testing.T) {
 func TestSendCtxReturnsErrActorStoppedAfterStop(t *testing.T) {
 	m := tinyMachine()
 	rec := &RecordingObserver[StateID, EventID, Context]{}
-	a := Start(m, Context{}, m.WithObservers(rec))
+	a := Start(m, Context{}, true, m.WithObservers(rec))
 
 	a.Stop()
 	rec.Reset() // discard anything the loop processed before Stop
@@ -134,7 +134,7 @@ func TestSendCtxReturnsCtxErrOnDeadline(t *testing.T) {
 		Build()
 
 	const mailboxSize = 4
-	a := Start(m, Context{}, m.WithMailboxSize(mailboxSize))
+	a := Start(m, Context{}, true, m.WithMailboxSize(mailboxSize))
 	t.Cleanup(func() {
 		close(release) // let the action return so Stop can drain
 		a.Stop()
@@ -170,7 +170,7 @@ func TestSendCtxReturnsCtxErrOnDeadline(t *testing.T) {
 // signature and silently absorb that.
 func TestSendIgnoresErrSilently(t *testing.T) {
 	m := tinyMachine()
-	a := Start(m, Context{})
+	a := Start(m, Context{}, true)
 
 	a.Stop()
 
@@ -181,7 +181,7 @@ func TestSendIgnoresErrSilently(t *testing.T) {
 func TestSendUsesBackgroundContext(t *testing.T) {
 	m := tinyMachine()
 	rec := &ctxRecorder{got: make(chan context.Context, 1)}
-	a := Start(m, Context{}, m.WithObservers(rec))
+	a := Start(m, Context{}, true, m.WithObservers(rec))
 	defer a.Stop()
 
 	a.Send("GO")

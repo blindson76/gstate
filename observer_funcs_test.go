@@ -23,7 +23,7 @@ func TestObserverFuncsTypedOnlyFires(t *testing.T) {
 	bar := newKindBarrier(KindTransition, 1)
 
 	m := guardedMachine(true)
-	a := Start(m, Context{}, m.WithObservers(obs, bar))
+	a := Start(m, Context{}, true, m.WithObservers(obs, bar))
 	defer a.Stop()
 
 	a.Send("GO")
@@ -52,7 +52,7 @@ func TestObserverFuncsAnyFiresForEveryCallback(t *testing.T) {
 	bar := newKindBarrier(KindTransition, 1)
 
 	m := guardedMachine(true)
-	a := Start(m, Context{}, m.WithObservers(obs, rec, bar))
+	a := Start(m, Context{}, true, m.WithObservers(obs, rec, bar))
 	defer a.Stop()
 
 	a.Send("GO")
@@ -85,7 +85,7 @@ func TestObserverFuncsAnyFiresBeforeKindSpecific(t *testing.T) {
 	bar := newKindBarrier(KindTransition, 1)
 
 	m := guardedMachine(true)
-	a := Start(m, Context{}, m.WithObservers(obs, bar))
+	a := Start(m, Context{}, true, m.WithObservers(obs, bar))
 	defer a.Stop()
 
 	a.Send("GO")
@@ -124,7 +124,7 @@ func TestObserverFuncsNilFieldsArentInvoked(t *testing.T) {
 	bar := newKindBarrier(KindTransition, 1)
 
 	m := guardedMachine(true)
-	a := Start(m, Context{}, m.WithObservers(obs, bar))
+	a := Start(m, Context{}, true, m.WithObservers(obs, bar))
 	defer a.Stop()
 
 	a.Send("GO")

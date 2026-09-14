@@ -58,7 +58,7 @@ func TestSortedActiveCacheFlat(t *testing.T) {
 		},
 	}
 
-	actor := Start(m, cacheCtx{}, m.WithObservers(obs))
+	actor := Start(m, cacheCtx{}, true, m.WithObservers(obs))
 	for i := 0; i < len(expected); i++ {
 		actor.Send("GO")
 	}
@@ -124,7 +124,7 @@ func TestSortedActiveCacheHierarchical(t *testing.T) {
 		},
 	}
 
-	actor := Start(m, cacheCtx{}, m.WithObservers(obs))
+	actor := Start(m, cacheCtx{}, true, m.WithObservers(obs))
 
 	// Initial: [left, left.child]
 	states := actor.States()
@@ -202,7 +202,7 @@ func TestSortedActiveCacheParallel(t *testing.T) {
 		},
 	}
 
-	actor := Start(m, cacheCtx{}, m.WithObservers(obs))
+	actor := Start(m, cacheCtx{}, true, m.WithObservers(obs))
 
 	// idle -> par
 	actor.Send("GO")
@@ -280,7 +280,7 @@ func TestSortedActiveCacheAlwaysChain(t *testing.T) {
 		},
 	}
 
-	actor := Start(m, cacheCtx{}, m.WithObservers(obs))
+	actor := Start(m, cacheCtx{}, true, m.WithObservers(obs))
 	actor.Send("GO")
 	actor.Send("RESET")
 	<-done
@@ -341,7 +341,7 @@ func TestSortedActiveStatesDeterministicTieBreaker(t *testing.T) {
 		},
 	}
 
-	actor := Start(m, cacheCtx{}, m.WithObservers(obs))
+	actor := Start(m, cacheCtx{}, true, m.WithObservers(obs))
 	actor.Send("GO")
 	<-enteredPar
 
@@ -370,4 +370,3 @@ func TestSortedActiveStatesDeterministicTieBreaker(t *testing.T) {
 		}
 	}
 }
-
