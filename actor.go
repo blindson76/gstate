@@ -86,6 +86,14 @@ type Actor[S ~string, E ~string, D Cloner[D]] struct {
 	// servicesActive controls whether invoke/timer services should be started
 	// when states are entered. It can be enabled later via [Actor.Activate].
 	servicesActive bool
+
+	// epochs counts entries per state. It advances on every entry whether or
+	// not services are active, so replicas that process the same events agree
+	// on it; [Actor.FireInternal] uses it to reject stale triggers.
+	epochs map[S]uint64
+	// dispatch, when set via [Machine.WithInternalDispatch], receives
+	// service-triggered transitions instead of executing them locally.
+	dispatch func(InternalTrigger[S])
 }
 
 // envelope carries an event together with the request-scoped context that
@@ -103,6 +111,7 @@ type config[S ~string, E ~string, D Cloner[D]] struct {
 	observers       []Observer[S, E, D]
 	actorID         ActorID
 	runToCompletion bool
+	dispatch        func(InternalTrigger[S])
 }
 
 // Option configures an [Actor] at [Start] or [Hydrate] time. Options are
@@ -190,6 +199,7 @@ func Start[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], initialData D
 		cfg.actorID = ActorID(idGen())
 	}
 
+	epochs := make(map[S]uint64)
 	a := &Actor[S, E, D]{
 		machine:         m,
 		data:            initialData,
@@ -202,6 +212,8 @@ func Start[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], initialData D
 		id:              cfg.actorID,
 		runToCompletion: cfg.runToCompletion,
 		servicesActive:  activate,
+		epochs:          epochs,
+		dispatch:        cfg.dispatch,
 	}
 	if !cfg.runToCompletion {
 		a.mailbox = make(chan envelope[E], cfg.mailboxSize)
@@ -267,6 +279,11 @@ func Hydrate[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], snapshot Sn
 		id = snapshot.ActorID
 	}
 
+	epochs := make(map[S]uint64, len(snapshot.Epochs))
+	for k, v := range snapshot.Epochs {
+		epochs[k] = v
+	}
+
 	a := &Actor[S, E, D]{
 		machine:         m,
 		data:            snapshot.Data,
@@ -279,6 +296,8 @@ func Hydrate[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], snapshot Sn
 		id:              id,
 		runToCompletion: cfg.runToCompletion,
 		servicesActive:  activate,
+		epochs:          epochs,
+		dispatch:        cfg.dispatch,
 	}
 	if !cfg.runToCompletion {
 		a.mailbox = make(chan envelope[E], cfg.mailboxSize)
@@ -519,20 +538,7 @@ func (a *Actor[S, E, D]) maybeAutoStop() {
 func (a *Actor[S, E, D]) Stop() {
 	a.stopOnce.Do(func() {
 		a.mu.Lock()
-		// Cancel all invocations
-		for _, cancel := range a.invocations {
-			cancel()
-		}
-		a.invocations = make(map[S]context.CancelFunc)
-		a.invokeGens = make(map[S]uint64)
-
-		// Stop all timers
-		for _, timers := range a.timers {
-			for _, t := range timers {
-				t.Stop()
-			}
-		}
-		a.timers = make(map[S][]*time.Timer)
+		a.stopServicesLocked()
 
 		// Signal shutdown. Senders parked in SendCtx's select wake on the
 		// stopped channel and return without delivering. The loop goroutine
@@ -635,6 +641,7 @@ func (a *Actor[S, E, D]) restartServices(ctx context.Context, id S) {
 
 		snap := a.data.Clone()
 		start := time.Now()
+		epoch := a.epochs[id]
 
 		mutate := func(fn func(D) D) {
 			a.mu.Lock()
@@ -681,21 +688,22 @@ func (a *Actor[S, E, D]) restartServices(ctx context.Context, id S) {
 			if invokeCtx.Err() != nil {
 				return // cancelled by state exit
 			}
-			target := invoke.OnDone
+			target, kind := invoke.OnDone, TriggerInvokeDone
 			if err != nil {
-				target = invoke.OnError
+				target, kind = invoke.OnError, TriggerInvokeError
 			}
 			if target != "" {
-				a.executeInternalTransition(context.WithoutCancel(invokeCtx), sID, target)
+				a.internalTransition(context.WithoutCancel(invokeCtx), kind, sID, target, epoch)
 			}
 		}(id, stateDef.Invoke, snap, mutate)
 	}
 
 	// Start or restart delayed transitions
+	epoch := a.epochs[id]
 	for _, t := range stateDef.Delayed {
 		trans := t // capture for closure
 		timer := time.AfterFunc(t.After, func() {
-			a.executeInternalTransition(context.Background(), id, trans.Target)
+			a.internalTransition(context.Background(), TriggerAfter, id, trans.Target, epoch)
 		})
 		a.timers[id] = append(a.timers[id], timer)
 	}
@@ -717,6 +725,11 @@ func (a *Actor[S, E, D]) Snapshot() Snapshot[S, D] {
 		history[k] = v
 	}
 
+	epochs := make(map[S]uint64, len(a.epochs))
+	for k, v := range a.epochs {
+		epochs[k] = v
+	}
+
 	ctx := a.data.Clone()
 
 	return Snapshot[S, D]{
@@ -724,6 +737,7 @@ func (a *Actor[S, E, D]) Snapshot() Snapshot[S, D] {
 		History: history,
 		Data:    ctx,
 		ActorID: a.id,
+		Epochs:  epochs,
 	}
 }
 
@@ -1147,6 +1161,7 @@ func (a *Actor[S, E, D]) executeTransition(ctx context.Context, sourceID S, t *T
 // notifies the observer.
 func (a *Actor[S, E, D]) enterSingleState(ctx context.Context, id S) {
 	a.active[id] = true
+	a.epochs[id]++
 	a.sortedActive = nil // invalidate cache
 	stateDef := a.machine.States[id]
 	if stateDef == nil {

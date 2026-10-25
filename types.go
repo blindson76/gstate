@@ -162,4 +162,7 @@ type Snapshot[S ~string, D Cloner[D]] struct {
 	// ActorID is the stable identifier of the actor that produced this snapshot.
 	// [Hydrate] restores it so telemetry correlation survives serialization.
 	ActorID ActorID `json:"actor_id,omitempty"`
+	// Epochs holds per-state entry counters used by [Actor.FireInternal] to
+	// reject stale [InternalTrigger] values. Missing entries restore as zero.
+	Epochs map[S]uint64 `json:"epochs,omitempty"`
 }
