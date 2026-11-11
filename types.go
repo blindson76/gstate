@@ -81,6 +81,13 @@ type StateDef[S ~string, E ~string, D Cloner[D]] struct {
 	Entry []func(D) D
 	// Exit holds functions called in order when leaving this state.
 	Exit []func(D) D
+	// EntryRaise holds internal events queued, in order, after this state's
+	// Entry actions run. See [TransitionDef.Raise] for run-to-completion
+	// semantics.
+	EntryRaise []E
+	// ExitRaise holds internal events queued, in order, after this state's
+	// Exit actions run. See [TransitionDef.Raise].
+	ExitRaise []E
 	// Invoke defines an async service started on entry and cancelled on exit.
 	Invoke *InvokeDef[S, E, D]
 	// History controls history tracking: None, Shallow, or Deep.
@@ -114,6 +121,16 @@ type TransitionDef[S ~string, E ~string, D Cloner[D]] struct {
 	Action func(D) D
 	// After is the delay before a timed transition fires.
 	After time.Duration
+	// Raise holds internal events queued, in order, after Action runs.
+	//
+	// Raised events follow SCXML run-to-completion semantics: they are
+	// appended to the actor's internal queue and processed within the
+	// current macrostep, after eventless (Always) and completion (OnDone)
+	// transitions settle and before the actor takes its next event from the
+	// mailbox. No external event, delayed timer, or invoke completion can
+	// interleave with them, and readers never observe the intermediate
+	// configuration.
+	Raise []E
 
 	// guardName is a human-readable label for the guard, used in SCXML export.
 	guardName string

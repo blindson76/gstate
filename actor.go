@@ -17,8 +17,11 @@ import (
 // was not delivered.
 var ErrActorStopped = errors.New("gstate: actor stopped")
 
-// ErrAlwaysLimit reports that eventless processing exhausted its step budget.
-// The actor shuts down and preserves its last configuration for inspection.
+// ErrAlwaysLimit reports that a macrostep exhausted its step budget. Eventless
+// (Always) transitions, completion (OnDone) transitions, and internal events
+// queued with Raise all count against the same per-macrostep budget, so an
+// unbounded Raise loop also trips it. The actor shuts down and preserves its
+// last configuration for inspection.
 var ErrAlwaysLimit = errors.New("gstate: Always transition budget exhausted")
 
 // defaultMailboxSize is the buffer size used when [WithMailboxSize] is not set.
@@ -50,6 +53,10 @@ type Actor[S ~string, E ~string, D Cloner[D]] struct {
 	stateGens           map[S]uint64
 	pendingFinalEntries []completionOccurrence[S]
 	pendingCompletions  []completionOccurrence[S]
+	// internalQueue holds events raised during the current macrostep. It is
+	// drained by stabilizeLocked before the actor lock is released, so it is
+	// always empty between macrosteps (run-to-completion).
+	internalQueue []E
 	// invokeGens maps active state IDs to their active invoke mutation generation token.
 	// It is cleared as soon as Invoke.Func returns or the state exits.
 	invokeGens map[S]uint64
@@ -536,6 +543,7 @@ func (a *Actor[S, E, D]) initiateShutdownLocked() {
 			}
 		}
 		a.timers = make(map[S][]*time.Timer)
+		a.internalQueue = nil
 
 		// Signal shutdown. Senders parked in SendCtx's select wake on the
 		// stopped channel and return without delivering. The loop goroutine
@@ -549,19 +557,22 @@ func (a *Actor[S, E, D]) initiateShutdownLocked() {
 // shutdown synchronously under the write lock.
 // Must be called with a.mu.Lock() held.
 func (a *Actor[S, E, D]) checkAndInitiateAutoStopLocked() {
-	var topLevel S
-	var found bool
+	if a.haltedLocked() {
+		a.initiateShutdownLocked()
+	}
+}
+
+// haltedLocked reports whether the top-level active state has completed with
+// no OnDone handler, i.e. the machine has reached its terminal configuration.
+// Must be called with a.mu held.
+func (a *Actor[S, E, D]) haltedLocked() bool {
 	for sID := range a.active {
 		sd := a.machine.States[sID]
 		if sd != nil && sd.parent == "" {
-			topLevel = sID
-			found = true
-			break
+			return len(sd.OnDone) == 0 && a.isStateDoneLocked(sID)
 		}
 	}
-	if found && len(a.machine.States[topLevel].OnDone) == 0 && a.isStateDoneLocked(topLevel) {
-		a.initiateShutdownLocked()
-	}
+	return false
 }
 
 // Stop shuts the actor down and waits for all goroutines it owns to exit
@@ -1022,18 +1033,7 @@ func (a *Actor[S, E, D]) handleEvent(ctx context.Context, event E, mutate func(D
 		a.data = mutate(a.data.Clone())
 	}
 
-	if len(a.eventReceivedObs) > 0 {
-		e := a.newEventNotice(event, "")
-		for _, o := range a.eventReceivedObs {
-			o.OnEventReceived(ctx, e)
-		}
-	}
-
-	selected := a.selectTransitions(ctx, event)
-	for _, candidate := range selected {
-		a.executeTransition(ctx, candidate.source, candidate.transition, event)
-	}
-	if len(selected) > 0 {
+	if a.dispatchEventLocked(ctx, event, false) {
 		a.stabilizeLocked(ctx)
 		a.getSortedActiveStatesLocked()
 		a.checkAndInitiateAutoStopLocked()
@@ -1044,8 +1044,36 @@ func (a *Actor[S, E, D]) handleEvent(ctx context.Context, event E, mutate func(D
 	if mutate != nil {
 		a.data = prevData
 	}
+}
+
+// dispatchEventLocked notifies receipt of event, selects and executes its
+// enabled transitions as one microstep, and reports whether any fired. When
+// none fires it notifies a "no_transition" drop. internal marks events taken
+// from the internal (Raise) queue. Must be called with a.mu.Lock() held.
+func (a *Actor[S, E, D]) dispatchEventLocked(ctx context.Context, event E, internal bool) bool {
+	if len(a.eventReceivedObs) > 0 {
+		e := a.newEventNotice(event, "")
+		e.Internal = internal
+		for _, o := range a.eventReceivedObs {
+			o.OnEventReceived(ctx, e)
+		}
+	}
+
+	selected := a.selectTransitions(ctx, event)
+	for _, candidate := range selected {
+		a.executeTransition(ctx, candidate.source, candidate.transition, event)
+	}
+	if len(selected) > 0 {
+		return true
+	}
+	a.notifyDroppedLocked(ctx, event, "no_transition", internal)
+	return false
+}
+
+func (a *Actor[S, E, D]) notifyDroppedLocked(ctx context.Context, event E, reason string, internal bool) {
 	if len(a.eventDroppedObs) > 0 {
-		e := a.newEventNotice(event, "no_transition")
+		e := a.newEventNotice(event, reason)
+		e.Internal = internal
 		for _, o := range a.eventDroppedObs {
 			o.OnEventDropped(ctx, e)
 		}
@@ -1193,6 +1221,7 @@ func (a *Actor[S, E, D]) executeTransition(ctx context.Context, sourceID S, t *T
 				}
 			}
 		}
+		a.internalQueue = append(a.internalQueue, t.Raise...)
 		if len(a.transitionObs) > 0 {
 			e := a.newTransitionEvent(sourceID, "", event)
 			for _, o := range a.transitionObs {
@@ -1228,6 +1257,7 @@ func (a *Actor[S, E, D]) executeTransition(ctx context.Context, sourceID S, t *T
 			for _, action := range stateDef.Exit {
 				a.data = action(a.data)
 			}
+			a.internalQueue = append(a.internalQueue, stateDef.ExitRaise...)
 			if cancel, ok := a.invocations[sID]; ok {
 				cancel()
 				delete(a.invocations, sID)
@@ -1265,6 +1295,8 @@ func (a *Actor[S, E, D]) executeTransition(ctx context.Context, sourceID S, t *T
 		}
 	}
 
+	a.internalQueue = append(a.internalQueue, t.Raise...)
+
 	// Enter the explicit target path and initialize all unselected regions.
 	offset := 0
 	if domain != "" {
@@ -1295,6 +1327,7 @@ func (a *Actor[S, E, D]) enterSingleState(ctx context.Context, id S) {
 	for _, action := range stateDef.Entry {
 		a.data = action(a.data)
 	}
+	a.internalQueue = append(a.internalQueue, stateDef.EntryRaise...)
 	if stateDef.Type == Final {
 		a.pendingFinalEntries = append(a.pendingFinalEntries, completionOccurrence[S]{id, a.stateGens[id]})
 	}

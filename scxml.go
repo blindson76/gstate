@@ -145,7 +145,7 @@ func (n *SCXMLNode) UnmarshalXML(dec *xml.Decoder, start xml.StartElement) error
 				}
 				n.Children = append(n.Children, child)
 			default:
-				// Skip unknown elements (datamodel, data, raise, initial, send, conf:*, etc.)
+				// Skip unknown elements (datamodel, data, initial, send, conf:*, etc.)
 				if err := dec.Skip(); err != nil {
 					return err
 				}
@@ -175,16 +175,35 @@ type SCXMLTransition struct {
 	Cond    string         `xml:"cond,attr,omitempty"`
 	Target  string         `xml:"target,attr,omitempty"`
 	Assign  []*SCXMLAssign `xml:"assign,omitempty"`
+	Raises  []*SCXMLRaise  `xml:"raise,omitempty"`
+}
+
+// SCXMLRaise represents a <raise> element: an internal event queued by
+// executable content and processed within the current macrostep.
+type SCXMLRaise struct {
+	Event string `xml:"event,attr"`
+}
+
+func raiseElements[E ~string](events []E) []*SCXMLRaise {
+	if len(events) == 0 {
+		return nil
+	}
+	out := make([]*SCXMLRaise, len(events))
+	for i, e := range events {
+		out[i] = &SCXMLRaise{Event: string(e)}
+	}
+	return out
 }
 
 // SCXMLOnEntry wraps executable content on state entry.
 type SCXMLOnEntry struct {
-	XMLName      xml.Name     `xml:"onentry"`
-	SendElements []*SCXMLSend `xml:"send,omitempty"`
-	Logs         []*SCXMLLog  `xml:"log,omitempty"`
+	XMLName      xml.Name      `xml:"onentry"`
+	SendElements []*SCXMLSend  `xml:"send,omitempty"`
+	Logs         []*SCXMLLog   `xml:"log,omitempty"`
+	Raises       []*SCXMLRaise `xml:"raise,omitempty"`
 }
 
-// UnmarshalXML handles <onentry> with unknown children (raise, datamodel, etc.).
+// UnmarshalXML handles <onentry> with unknown children (datamodel, etc.).
 func (e *SCXMLOnEntry) UnmarshalXML(dec *xml.Decoder, start xml.StartElement) error {
 	for {
 		tok, err := dec.Token()
@@ -206,6 +225,12 @@ func (e *SCXMLOnEntry) UnmarshalXML(dec *xml.Decoder, start xml.StartElement) er
 					return err
 				}
 				e.SendElements = append(e.SendElements, se)
+			case "raise":
+				r := &SCXMLRaise{}
+				if err := dec.DecodeElement(r, &t); err != nil {
+					return err
+				}
+				e.Raises = append(e.Raises, r)
 			default:
 				if err := dec.Skip(); err != nil {
 					return err
@@ -219,8 +244,9 @@ func (e *SCXMLOnEntry) UnmarshalXML(dec *xml.Decoder, start xml.StartElement) er
 
 // SCXMLOnExit wraps executable content on state exit.
 type SCXMLOnExit struct {
-	XMLName xml.Name    `xml:"onexit"`
-	Logs    []*SCXMLLog `xml:"log,omitempty"`
+	XMLName xml.Name      `xml:"onexit"`
+	Logs    []*SCXMLLog   `xml:"log,omitempty"`
+	Raises  []*SCXMLRaise `xml:"raise,omitempty"`
 }
 
 // UnmarshalXML handles <onexit> with unknown children.
@@ -341,9 +367,7 @@ func convertStateNode[S ~string, E ~string, D Cloner[D]](def *StateDef[S, E, D],
 		node.Initial = string(def.Initial)
 	}
 
-	if len(def.Entry) > 0 {
-		node.OnEntry = &SCXMLOnEntry{Logs: lifecycleDescriptions(len(def.Entry), def.entryLabels, "entry action")}
-	}
+	node.OnEntry = onEntryElement(def)
 
 	if len(def.Delayed) > 0 {
 		if node.OnEntry == nil {
@@ -357,9 +381,7 @@ func convertStateNode[S ~string, E ~string, D Cloner[D]](def *StateDef[S, E, D],
 		}
 	}
 
-	if len(def.Exit) > 0 {
-		node.OnExit = &SCXMLOnExit{Logs: lifecycleDescriptions(len(def.Exit), def.exitLabels, "exit action")}
-	}
+	node.OnExit = onExitElement(def)
 
 	// Use eventOrder to preserve declaration order of transitions
 	for _, event := range def.eventOrder {
@@ -432,13 +454,29 @@ func convertStateNode[S ~string, E ~string, D Cloner[D]](def *StateDef[S, E, D],
 
 func convertFinalNode[S ~string, E ~string, D Cloner[D]](def *StateDef[S, E, D], m *Machine[S, E, D]) (SCXMLNode, error) {
 	node := SCXMLNode{Kind: NodeFinal, ID: string(def.ID)}
-	if len(def.Entry) > 0 {
-		node.OnEntry = &SCXMLOnEntry{Logs: lifecycleDescriptions(len(def.Entry), def.entryLabels, "entry action")}
-	}
-	if len(def.Exit) > 0 {
-		node.OnExit = &SCXMLOnExit{Logs: lifecycleDescriptions(len(def.Exit), def.exitLabels, "exit action")}
-	}
+	node.OnEntry = onEntryElement(def)
+	node.OnExit = onExitElement(def)
 	return node, nil
+}
+
+func onEntryElement[S ~string, E ~string, D Cloner[D]](def *StateDef[S, E, D]) *SCXMLOnEntry {
+	if len(def.Entry) == 0 && len(def.EntryRaise) == 0 {
+		return nil
+	}
+	return &SCXMLOnEntry{
+		Logs:   lifecycleDescriptions(len(def.Entry), def.entryLabels, "entry action"),
+		Raises: raiseElements(def.EntryRaise),
+	}
+}
+
+func onExitElement[S ~string, E ~string, D Cloner[D]](def *StateDef[S, E, D]) *SCXMLOnExit {
+	if len(def.Exit) == 0 && len(def.ExitRaise) == 0 {
+		return nil
+	}
+	return &SCXMLOnExit{
+		Logs:   lifecycleDescriptions(len(def.Exit), def.exitLabels, "exit action"),
+		Raises: raiseElements(def.ExitRaise),
+	}
 }
 
 func convertTransition[S ~string, E ~string, D Cloner[D]](t *TransitionDef[S, E, D], event string) *SCXMLTransition {
@@ -453,6 +491,7 @@ func convertTransition[S ~string, E ~string, D Cloner[D]](t *TransitionDef[S, E,
 	if t.Action != nil {
 		tr.Assign = []*SCXMLAssign{{Location: t.actionName}}
 	}
+	tr.Raises = raiseElements(t.Raise)
 	return tr
 }
 

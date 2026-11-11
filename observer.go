@@ -333,7 +333,11 @@ type EventNotice[S ~string, E ~string, D Cloner[D]] struct {
 	Event     E       `json:"event"`
 	// Reason describes why the event was dropped (e.g. "no_transition"). It is
 	// empty on OnEventReceived.
-	Reason    string    `json:"reason,omitempty"`
+	Reason string `json:"reason,omitempty"`
+	// Internal is true for events raised by the machine itself (see
+	// [TransitionDef.Raise]) and false for events delivered through the
+	// mailbox by Send and its variants.
+	Internal  bool      `json:"internal,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
 }
 

@@ -57,8 +57,11 @@ func (a *Actor[S, E, D]) completionGuard(ctx context.Context, source S, t *Trans
 	return ok
 }
 
-// stabilizeLocked settles eventless transitions before dispatching each queued
-// completion. All callers hold the actor lock and have finished their event batch.
+// stabilizeLocked completes the current macrostep. It settles eventless
+// transitions before dispatching each queued completion, and only when both
+// are exhausted dequeues the next raised internal event, repeating until all
+// three are empty. All callers hold the actor lock and have finished their
+// event batch, so no external event can interleave (run-to-completion).
 func (a *Actor[S, E, D]) stabilizeLocked(ctx context.Context) {
 	budget := max(100, 2*len(a.machine.States))
 	steps := 0
@@ -84,7 +87,13 @@ func (a *Actor[S, E, D]) stabilizeLocked(ctx context.Context) {
 		}
 		if selected == nil {
 			if len(a.pendingCompletions) == 0 {
-				return
+				if len(a.internalQueue) == 0 {
+					return
+				}
+				if !a.processInternalEventLocked(ctx, &steps, budget) {
+					return
+				}
+				continue
 			}
 			occurrence := a.pendingCompletions[0]
 			a.pendingCompletions = a.pendingCompletions[1:]
@@ -101,12 +110,44 @@ func (a *Actor[S, E, D]) stabilizeLocked(ctx context.Context) {
 				continue
 			}
 		}
-		if steps == budget {
-			a.terminalErr = ErrAlwaysLimit
-			a.initiateShutdownLocked()
+		if !a.spendStepLocked(&steps, budget) {
 			return
 		}
-		steps++
 		a.executeTransition(ctx, source, selected, zero)
 	}
+}
+
+// spendStepLocked consumes one macrostep budget unit, or shuts the actor down
+// with ErrAlwaysLimit and reports false once the budget is exhausted.
+func (a *Actor[S, E, D]) spendStepLocked(steps *int, budget int) bool {
+	if *steps == budget {
+		a.terminalErr = ErrAlwaysLimit
+		a.initiateShutdownLocked()
+		return false
+	}
+	*steps++
+	return true
+}
+
+// processInternalEventLocked dequeues and dispatches the oldest raised event.
+// It runs only once eventless and completion transitions have settled, so
+// the event sees a stable configuration. If the machine has already halted,
+// remaining raised events are discarded with a "halted" drop notice. It
+// reports false when the caller should stop stabilizing.
+func (a *Actor[S, E, D]) processInternalEventLocked(ctx context.Context, steps *int, budget int) bool {
+	if a.haltedLocked() {
+		queue := a.internalQueue
+		a.internalQueue = nil
+		for _, event := range queue {
+			a.notifyDroppedLocked(ctx, event, "halted", true)
+		}
+		return false
+	}
+	if !a.spendStepLocked(steps, budget) {
+		return false
+	}
+	event := a.internalQueue[0]
+	a.internalQueue = a.internalQueue[1:]
+	a.dispatchEventLocked(ctx, event, true)
+	return true
 }

@@ -319,6 +319,33 @@ s.State("check_balance", func(s *gstate.StateBuilder[MyState, MyEvent, MyData]) 
 })
 ```
 
+### Internal Events and Run-to-Completion (`Raise`)
+
+Every event is processed with **run-to-completion** semantics: the actor finishes the whole *macrostep* an event triggers before it takes the next event from the mailbox. A macrostep includes the event's transitions, then any `Always` transitions, `OnDone` completions, and **internal events** raised along the way. No external `Send`, `After` timer, or `Invoke` completion can interleave, and `State()`, `Data()`, and `Snapshot()` never see a half-finished configuration.
+
+Use `Raise` to queue internal events, like SCXML's `<raise>`. You can raise from a transition (after its `Assign` actions), or from state entry or exit:
+
+```go
+s.State("validating", func(s *gstate.StateBuilder[MyState, MyEvent, MyData]) {
+    s.RaiseOnEntry("CHECK")             // queued after Entry actions
+    s.RaiseOnExit("VALIDATION_DONE")    // queued after Exit actions
+    s.On("CHECK").
+        Assign(validate).
+        Raise("VALIDATED").             // queued after Assign
+        GoTo("ready")
+})
+```
+
+How raised events behave:
+
+- Raised events form a FIFO internal queue: exit raises, then transition raises, then entry raises, in the order they run.
+- The actor takes a raised event only after `Always` and `OnDone` transitions have settled. It is dispatched exactly like an external event: same transition selection, guards, and the triggering event's `context.Context`.
+- Unless the machine halts, the actor processes all queued internal events before it reads the next mailbox event, even if a `Send` happened first. The actor runs a raise you make in the initial configuration before `Start` or `Hydrate` returns.
+- An unhandled raised event triggers `OnEventDropped` with reason `no_transition`. When a top-level `Final` state halts the machine, the actor discards the remaining raised events and reports each one with reason `halted`. `EventNotice.Internal` is `true` for raised events.
+- Raised events count against the same per-macrostep budget as `Always` and `OnDone`. A `Raise` loop with no end stops the actor with `ErrAlwaysLimit`.
+
+> **Prefer `Raise` over calling `actor.Send` from inside an action.** A `Send` from an action goes to the back of the mailbox, so external events already waiting run first. If the mailbox is full, it blocks forever, because the actor that would drain the mailbox is the one making the call.
+
 ---
 
 ## 10. Final States and Local Completion (`OnDone`)
@@ -852,6 +879,7 @@ Also available:
 | History (shallow/deep) | ✓ (notes) | ✓ (`<history>`) |
 | Invoke (onDone/onError) | ✓ | ✓ |
 | Action labels | ✓ | ✓ (`<assign>`) |
+| Internal events (`Raise`) | — | ✓ (`<raise>` in `<transition>` / `<onentry>` / `<onexit>`) |
 
 > **Note:** Export captures the static structure of a machine definition. Runtime behavior (Go functions for guards, actions, invocations) cannot be serialized — labels are used as descriptive placeholders.
 
@@ -862,6 +890,7 @@ Also available:
 `gstate` uses a hybrid concurrency model to ensure safety and performance:
 
 - **Sequential Mailbox (Channels)**: All events sent via `actor.Send(event)` are queued. A background goroutine processes them one by one, ensuring that state transitions and context updates are **strictly sequential**.
+- **Run-to-Completion**: Each event's macrostep, including `Always` and `OnDone` transitions and any events raised with `Raise`, runs under the actor's write lock. It finishes before the actor takes the next mailbox event, timer, or invoke completion.
 - **Thread-Safe Access (RWMutex)**: Methods like `actor.State()`, `actor.States()`, `actor.Data()`, and `actor.Snapshot()` are safe to call concurrently. They use a read-lock to provide a consistent view of the actor.
 - **Asynchronous Integrity**: `Invoke` and `After` run in separate goroutines but their results are funneled back through the sequential logic to prevent data races on your data.
 

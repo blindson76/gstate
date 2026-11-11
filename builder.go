@@ -516,6 +516,18 @@ func (s *StateBuilder[S, E, D]) ExitLabel(name string) {
 	s.labelAction("exit", s.state.exitLabels, name)
 }
 
+// RaiseOnEntry appends internal events queued each time this state is
+// entered, after its Entry actions run. See [TransitionDef.Raise].
+func (s *StateBuilder[S, E, D]) RaiseOnEntry(events ...E) {
+	s.state.EntryRaise = append(s.state.EntryRaise, events...)
+}
+
+// RaiseOnExit appends internal events queued each time this state is exited,
+// after its Exit actions run. See [TransitionDef.Raise].
+func (s *StateBuilder[S, E, D]) RaiseOnExit(events ...E) {
+	s.state.ExitRaise = append(s.state.ExitRaise, events...)
+}
+
 // EntryNamed appends an entry reducer and names it for diagrams.
 func (s *StateBuilder[S, E, D]) EntryNamed(name string, fn func(D) D) {
 	s.Entry(fn)
@@ -676,6 +688,14 @@ func (t *TransitionBuilder[S, E, D]) Assign(fn func(D) D) *TransitionBuilder[S, 
 	} else {
 		t.def.Action = func(data D) D { return fn(previous(data)) }
 	}
+	return t
+}
+
+// Raise appends internal events queued when the transition fires, after its
+// Assign actions run. Raised events are processed before the actor takes its
+// next mailbox event; see [TransitionDef.Raise].
+func (t *TransitionBuilder[S, E, D]) Raise(events ...E) *TransitionBuilder[S, E, D] {
+	t.def.Raise = append(t.def.Raise, events...)
 	return t
 }
 
