@@ -48,6 +48,41 @@ func TestCompletionRuntimeAlwaysPrecedesDone(t *testing.T) {
 	}
 }
 
+func TestRunToCompletionDefersQueuedEventUntilAlwaysSettles(t *testing.T) {
+	var a *Actor[StateID, EventID, Context]
+	completed := make(chan struct{})
+	m := New[StateID, EventID, Context]("run-to-completion").Initial("ready").State("ready", func(s *completionRuntimeState) {
+		s.On("START").GoTo("workflow")
+	}).State("workflow", func(s *completionRuntimeState) {
+		s.Initial("transient")
+		s.State("transient", func(s *completionRuntimeState) {
+			s.On("NEXT").GoTo("wrong")
+			s.Always().GoTo("final")
+		})
+		s.State("final", func(s *completionRuntimeState) { s.Type(Final) })
+		s.OnDone().GoTo("settled")
+	}).State("settled", func(s *completionRuntimeState) {
+		s.On("NEXT").GoTo("done")
+	}).State("wrong", func(s *completionRuntimeState) {}).State("done", func(s *completionRuntimeState) {
+		s.Entry(func(d Context) Context {
+			close(completed)
+			return d
+		})
+	}).Build()
+	a = Start(m, Context{}, m.WithObservers(ObserverFuncs[StateID, EventID, Context]{TransitionFunc: func(_ context.Context, e *TransitionEvent[StateID, EventID, Context]) {
+		if e.Event == "START" {
+			a.Send("NEXT")
+		}
+	}}))
+	defer a.Stop()
+
+	a.Send("START")
+	completionWait(t, completed)
+	if !a.Matches("done") || a.Matches("wrong") {
+		t.Fatalf("queued event ran before Always settled: %v", a.States())
+	}
+}
+
 func TestCompletionRuntimeInvokeMutationSettlesBeforeReturning(t *testing.T) {
 	returned := make(chan struct{})
 	m := New[StateID, EventID, Context]("completion-mutate").Initial("work").State("work", func(s *completionRuntimeState) {

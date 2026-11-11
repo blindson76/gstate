@@ -36,8 +36,9 @@ var idGen = func() func() string {
 }()
 
 // Actor is the runtime interpreter for a statechart machine.
-// It maintains the current state, processes events sequentially,
-// and manages asynchronous services (invocations and timers).
+// It maintains the current state, processes mailbox events sequentially to
+// completion (including eventless and completion transitions), and manages
+// asynchronous services (invocations and timers).
 type Actor[S ~string, E ~string, D Cloner[D]] struct {
 	machine     *Machine[S, E, D]
 	data        D

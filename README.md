@@ -622,7 +622,7 @@ actor.SendWith(EventPrompt, attachPrompt)            // fire-and-forget with tra
 err = actor.SendCtxWith(ctx, EventPrompt, attachPrompt) // ctx-honoring with transactional payload reducer
 ```
 
-Events are queued in a channel-based mailbox and processed sequentially, ensuring state transitions are never concurrent.
+Events are queued in a channel-based mailbox and processed sequentially. Each event runs to completion: its compatible transitions execute as one batch, followed by all enabled `Always` and `OnDone` transitions, before the next queued event begins. Events enqueued during a transition remain queued until this macrostep settles.
 
 `SendWith` and `SendCtxWith` apply a payload reducer `func(D) D` to a cloned copy of the actor's data *before* transition guards are evaluated, so guards can inspect the incoming event's payload. If no transition is enabled (`OnEventDropped`), the candidate data is discarded and the actor's state data remains unchanged.
 
