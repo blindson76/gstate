@@ -95,9 +95,11 @@ type Actor[S ~string, E ~string, D Cloner[D]] struct {
 // envelope carries an event together with the request-scoped context and
 // optional transactional payload mutator that originated it through the actor's mailbox.
 type envelope[E ~string, D any] struct {
-	ctx    context.Context
-	event  E
-	mutate func(D) D
+	ctx        context.Context
+	event      E
+	mutate     func(D) D
+	processing chan struct{}
+	completed  chan error
 }
 
 // config holds the resolved configuration for an [Actor]. It is built by
@@ -912,11 +914,11 @@ func (a *Actor[S, E, D]) computeSortedActiveStates() []S {
 	return res
 }
 
-// Send enqueues an event in the actor's mailbox using [context.Background]
-// as the request-scoped context. It is a thin wrapper over [Actor.SendCtx]
-// that discards the returned error; with context.Background the only
-// possible non-nil return is [ErrActorStopped], in which case the send
-// is a no-op per Stop's contract (no panic, no delivery).
+// Send sends an event using [context.Background] as the request-scoped context
+// and waits for the event's run-to-completion step to settle. It is a thin
+// wrapper over [Actor.SendCtx] that discards the returned error; with
+// context.Background the only possible non-nil return is [ErrActorStopped],
+// in which case the send is a no-op per Stop's contract (no panic, no delivery).
 //
 // Callers that need to react to delivery failure should use [Actor.SendCtx]
 // directly.
@@ -924,35 +926,37 @@ func (a *Actor[S, E, D]) Send(event E) {
 	_ = a.SendCtx(context.Background(), event)
 }
 
-// SendWith enqueues an event paired with a transactional payload reducer fn
-// using [context.Background]. See [Actor.SendCtxWith] for the payload and
-// rollback semantics.
+// SendWith sends an event paired with a transactional payload reducer fn using
+// [context.Background] and waits for run-to-completion. See [Actor.SendCtxWith]
+// for the payload and rollback semantics.
 func (a *Actor[S, E, D]) SendWith(event E, fn func(D) D) {
 	_ = a.SendCtxWith(context.Background(), event, fn)
 }
 
-// SendCtx enqueues an event in the actor's mailbox carrying the supplied
-// request-scoped context. The context is threaded into every [Observer]
-// callback fired in response to this event (including Always transitions
-// chained after it) AND it gates the enqueue itself.
+// SendCtx sends an event in the actor's mailbox carrying the supplied
+// request-scoped context, then waits for the event's run-to-completion step to
+// settle. The context is threaded into every [Observer] callback fired in
+// response to this event (including Always transitions chained after it) and
+// gates the enqueue itself.
 //
 // Returns:
-//   - nil when the event was enqueued.
+//   - nil when the event was processed through run-to-completion.
 //   - ctx.Err() ([context.Canceled] or [context.DeadlineExceeded]) when
 //     the supplied context was cancelled or its deadline elapsed before
 //     the event could be enqueued. The event is NOT delivered.
 //   - [ErrActorStopped] when the actor was stopped before the event could
-//     be enqueued. The event is NOT delivered.
+//     be processed to completion. The event may have been enqueued, but if it
+//     was not already being processed it is NOT delivered.
 //
 // Behaviour when the mailbox is full: SendCtx blocks until one of three
-// things happens — a slot opens, ctx is done, or the actor is stopped.
-// It never blocks forever.
+// things happens — a slot opens, ctx is done, or the actor is stopped. After
+// enqueueing, it waits for processing to complete or for the actor to stop.
 func (a *Actor[S, E, D]) SendCtx(ctx context.Context, event E) error {
 	return a.SendCtxWith(ctx, event, nil)
 }
 
-// SendCtxWith enqueues an event together with a typed payload reducer fn.
-// When the actor processes the event:
+// SendCtxWith sends an event together with a typed payload reducer fn and waits
+// for run-to-completion. When the actor processes the event:
 //   - fn is applied to a cloned copy of the actor's data before transition
 //     guards are evaluated, allowing guards to inspect the event payload.
 //   - If at least one transition fires, the mutated data is committed before
@@ -962,6 +966,13 @@ func (a *Actor[S, E, D]) SendCtx(ctx context.Context, event E) error {
 func (a *Actor[S, E, D]) SendCtxWith(ctx context.Context, event E, fn func(D) D) error {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	env := envelope[E, D]{
+		ctx:        ctx,
+		event:      event,
+		mutate:     fn,
+		processing: make(chan struct{}),
+		completed:  make(chan error, 1),
 	}
 	// Fast path: bail before enqueueing if ctx or actor is already done.
 	// Without this, the inner select could pick the mailbox-send case
@@ -975,8 +986,23 @@ func (a *Actor[S, E, D]) SendCtxWith(ctx context.Context, event E, fn func(D) D)
 	default:
 	}
 	select {
-	case a.mailbox <- envelope[E, D]{ctx: ctx, event: event, mutate: fn}:
-		return nil
+	case a.mailbox <- env:
+		select {
+		case err := <-env.completed:
+			return err
+		case <-a.stopped:
+			select {
+			case err := <-env.completed:
+				return err
+			default:
+			}
+			select {
+			case <-env.processing:
+				return <-env.completed
+			default:
+				return ErrActorStopped
+			}
+		}
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-a.stopped:
@@ -1000,20 +1026,21 @@ func (a *Actor[S, E, D]) loop() {
 		}
 		select {
 		case env := <-a.mailbox:
-			a.handleEvent(env.ctx, env.event, env.mutate)
+			close(env.processing)
+			env.completed <- a.handleEvent(env.ctx, env.event, env.mutate)
 		case <-a.stopped:
 			return
 		}
 	}
 }
 
-func (a *Actor[S, E, D]) handleEvent(ctx context.Context, event E, mutate func(D) D) {
+func (a *Actor[S, E, D]) handleEvent(ctx context.Context, event E, mutate func(D) D) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	select {
 	case <-a.stopped:
-		return
+		return ErrActorStopped
 	default:
 	}
 
@@ -1037,7 +1064,7 @@ func (a *Actor[S, E, D]) handleEvent(ctx context.Context, event E, mutate func(D
 		a.stabilizeLocked(ctx)
 		a.getSortedActiveStatesLocked()
 		a.checkAndInitiateAutoStopLocked()
-		return
+		return nil
 	}
 
 	// No transition fired for this event; roll back any uncommitted payload mutation.
@@ -1050,6 +1077,7 @@ func (a *Actor[S, E, D]) handleEvent(ctx context.Context, event E, mutate func(D
 			o.OnEventDropped(ctx, e)
 		}
 	}
+	return nil
 }
 
 // eventTransition is selected against the configuration before any actions run.

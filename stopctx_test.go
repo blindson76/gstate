@@ -61,8 +61,16 @@ func TestStopCtxActionDeadline(t *testing.T) {
 		s.On("BLOCK").Assign(func(d Context) Context { close(entered); <-release; return d })
 	}).Build()
 	a := Start(m, Context{})
-	defer func() { close(release); a.Stop() }()
-	a.Send("BLOCK")
+	sendDone := make(chan struct{})
+	defer func() {
+		close(release)
+		a.Stop()
+		<-sendDone
+	}()
+	go func() {
+		a.Send("BLOCK")
+		close(sendDone)
+	}()
 	<-entered
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()

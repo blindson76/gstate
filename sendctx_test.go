@@ -3,6 +3,7 @@ package gstate
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -115,6 +116,8 @@ func TestSendCtxReturnsErrActorStoppedAfterStop(t *testing.T) {
 func TestSendCtxReturnsCtxErrOnDeadline(t *testing.T) {
 	actionEntered := make(chan struct{})
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
 
 	// Block the loop goroutine inside an action so the mailbox cannot drain.
 	// Once the loop is parked here, every subsequent SendCtx that fills the
@@ -135,22 +138,31 @@ func TestSendCtxReturnsCtxErrOnDeadline(t *testing.T) {
 
 	const mailboxSize = 4
 	a := Start(m, Context{}, m.WithMailboxSize(mailboxSize))
+	holdSendDone := make(chan struct{})
 	t.Cleanup(func() {
-		close(release) // let the action return so Stop can drain
+		unblock() // let the action return so Stop can drain
 		a.Stop()
+		<-holdSendDone
 	})
 
 	// Send the event that runs the blocking action; wait until the loop is
 	// parked inside it. The loop has now consumed this one event and is
 	// stuck; nothing else will be pulled from the mailbox until release.
-	a.Send("HOLD")
+	go func() {
+		a.Send("HOLD")
+		close(holdSendDone)
+	}()
 	<-actionEntered
 
-	// Fill the mailbox with non-blocking sends so the next call will block.
-	// Use Background() so these all succeed.
+	// Fill the mailbox directly because SendCtx now waits for each event to
+	// complete after enqueueing. Use Background() so the attempted send blocks
+	// only on mailbox capacity.
 	for i := 0; i < mailboxSize; i++ {
-		if err := a.SendCtx(context.Background(), "FILL"); err != nil {
-			t.Fatalf("unexpected err filling mailbox: %v", err)
+		a.mailbox <- envelope[EventID, Context]{
+			ctx:        context.Background(),
+			event:      "FILL",
+			processing: make(chan struct{}),
+			completed:  make(chan error, 1),
 		}
 	}
 
@@ -227,6 +239,8 @@ func TestSendWaitsForRunToCompletion(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			actionEntered := make(chan struct{})
 			release := make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
 			sendReturned := make(chan error, 1)
 
 			m := New[StateID, EventID, Context]("send_run_to_completion").
@@ -245,7 +259,7 @@ func TestSendWaitsForRunToCompletion(t *testing.T) {
 				Build()
 			a := Start(m, Context{})
 			t.Cleanup(func() {
-				close(release)
+				unblock()
 				a.Stop()
 			})
 
@@ -266,7 +280,7 @@ func TestSendWaitsForRunToCompletion(t *testing.T) {
 			case <-time.After(25 * time.Millisecond):
 			}
 
-			close(release)
+			unblock()
 			select {
 			case err := <-sendReturned:
 				if err != nil {

@@ -476,7 +476,7 @@ actor := gstate.Start(machine, MyData{}, machine.WithObservers(rec))
 
 - All callbacks except `OnInvokeCompleted` run synchronously under the actor's write lock, on the goroutine handling startup, a mailbox event, a timer, or an invoke transition. This includes `OnInvokeStarted`, which fires when an invoked service is launched during state entry. Implementations must be non-blocking.
 - Observers **must not** call methods on the same `Actor` that would re-enter the actor lock (e.g. `Snapshot()`, `State()`).
-- Observers **must not** call `Send` / `SendCtx` synchronously: the channel send can block on a full mailbox, and the loop goroutine that would drain it cannot acquire the actor lock the observer is holding — a hard deadlock. If you need to dispatch an event from an observer, do it from a fresh goroutine:
+- Observers **must not** call `Send` / `SendCtx` synchronously: those methods wait for the mailbox loop to process the event, but the loop cannot continue until the observer returns — a hard deadlock. If you need to dispatch an event from an observer, do it from a fresh goroutine:
   ```go
   func (o *myObs) OnTransition(_ context.Context, e *gstate.TransitionEvent[...]) {
       go func() { actor.Send(EventX) }()
@@ -616,13 +616,13 @@ fmt.Println(actor.ID()) // e.g. "V1StGXR8_Z5j"
 ### Sending Events
 
 ```go
-actor.Send(EventIncrement)                           // fire-and-forget
-err := actor.SendCtx(ctx, EventStart)                // ctx-honoring, returns error
-actor.SendWith(EventPrompt, attachPrompt)            // fire-and-forget with transactional payload reducer
-err = actor.SendCtxWith(ctx, EventPrompt, attachPrompt) // ctx-honoring with transactional payload reducer
+actor.Send(EventIncrement)                           // waits for run-to-completion
+err := actor.SendCtx(ctx, EventStart)                // ctx-honoring, waits and returns error
+actor.SendWith(EventPrompt, attachPrompt)            // waits with transactional payload reducer
+err = actor.SendCtxWith(ctx, EventPrompt, attachPrompt) // ctx-honoring, waits with payload reducer
 ```
 
-Events are queued in a channel-based mailbox and processed sequentially, ensuring state transitions are never concurrent.
+Events are queued in a channel-based mailbox and processed sequentially, ensuring state transitions are never concurrent. `Send`, `SendCtx`, `SendWith`, and `SendCtxWith` return only after their event and its enabled eventless/completion transitions have settled. This lets callers inspect the resulting actor state immediately after a successful send.
 
 `SendWith` and `SendCtxWith` apply a payload reducer `func(D) D` to a cloned copy of the actor's data *before* transition guards are evaluated, so guards can inspect the incoming event's payload. If no transition is enabled (`OnEventDropped`), the candidate data is discarded and the actor's state data remains unchanged.
 
@@ -639,13 +639,13 @@ if err := actor.SendCtx(ctx, EventDoTheThing); err != nil {
 }
 ```
 
-The provided `ctx` is threaded into every `Observer` callback fired in response to this event (including Always transitions chained after it), **and** it gates the enqueue itself. `SendCtx` returns:
+The provided `ctx` is threaded into every `Observer` callback fired in response to this event (including Always transitions chained after it), **and** it gates the enqueue itself. After enqueueing, `SendCtx` waits for run-to-completion. It returns:
 
-- `nil` when the event was enqueued.
+- `nil` when the event has been processed through run-to-completion.
 - `ctx.Err()` (`context.Canceled` or `context.DeadlineExceeded`) when the supplied context was cancelled or its deadline elapsed before enqueue. The event is **not** delivered.
-- `gstate.ErrActorStopped` when `Stop` was called before enqueue. The event is **not** delivered.
+- `gstate.ErrActorStopped` when the actor stopped before processing completed. An event not yet being processed is **not** delivered.
 
-When the mailbox is full, `SendCtx` blocks until a slot opens, the context is done, or the actor is stopped. It never blocks forever.
+When the mailbox is full, `SendCtx` blocks until a slot opens, the context is done, or the actor is stopped. After enqueueing it waits for processing to complete or the actor to stop.
 
 ### Reading State
 

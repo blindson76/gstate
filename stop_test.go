@@ -123,7 +123,11 @@ func TestStopWaitsForInFlightTransitionAction(t *testing.T) {
 
 	a := Start(m, Context{})
 
-	a.Send("GO")
+	sendDone := make(chan struct{})
+	go func() {
+		a.Send("GO")
+		close(sendDone)
+	}()
 	<-actionStarted // loop goroutine is inside handleEvent, holding mu
 
 	stopDone := make(chan struct{})
@@ -138,6 +142,7 @@ func TestStopWaitsForInFlightTransitionAction(t *testing.T) {
 
 	<-stopDone
 
+	<-sendDone
 	select {
 	case <-finished:
 		// expected: action's defer ran before Stop returned

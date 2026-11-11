@@ -33,11 +33,10 @@ import (
 //     require re-entering the actor lock (e.g. [Actor.Snapshot],
 //     [Actor.State]).
 //   - Implementations must not call [Actor.Send] or [Actor.SendCtx]
-//     synchronously: the channel send can block on a full mailbox, and the
-//     loop goroutine that would drain it cannot acquire the actor lock the
-//     observer is holding — a hard deadlock. If an observer needs to dispatch
-//     into the actor, do it from a fresh goroutine
-//     (e.g. `go func() { actor.Send(EventX) }()`).
+//     synchronously: those methods wait for the mailbox loop to process the
+//     event, but that loop cannot continue until the observer returns — a hard
+//     deadlock. If an observer needs to dispatch into the actor, do it from a
+//     fresh goroutine (e.g. `go func() { actor.Send(EventX) }()`).
 //   - OnInvokeCompleted fires from the invoke goroutine and does not hold the
 //     actor lock. It must not call Stop synchronously: Stop waits for this
 //     invocation goroutine to return. Schedule Stop from another goroutine.
