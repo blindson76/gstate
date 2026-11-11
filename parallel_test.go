@@ -32,7 +32,7 @@ func TestActorParallel(t *testing.T) {
 		}).
 		Build()
 
-	step := make(chan struct{})
+	step := make(chan struct{}, 1)
 	obs := ObserverFuncs[StateID, EventID, Context]{
 		TransitionFunc: func(context.Context, *TransitionEvent[StateID, EventID, Context]) {
 			step <- struct{}{}

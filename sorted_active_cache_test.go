@@ -38,7 +38,7 @@ func TestSortedActiveCacheFlat(t *testing.T) {
 
 	expected := [][]S{{"b"}, {"c"}, {"a"}, {"b"}, {"c"}, {"a"}}
 	results := make([][]S, 0, len(expected))
-	step := make(chan struct{})
+	step := make(chan struct{}, 1)
 
 	obs := ObserverFuncs[S, E, D]{
 		TransitionFunc: func(_ context.Context, _ *TransitionEvent[S, E, D]) {
@@ -93,7 +93,7 @@ func TestSortedActiveCacheHierarchical(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var transitions []stateSnap
-	step := make(chan struct{})
+	step := make(chan struct{}, 6)
 	const rounds = 6
 
 	obs := ObserverFuncs[S, E, D]{
