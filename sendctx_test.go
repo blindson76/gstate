@@ -202,3 +202,82 @@ func TestSendUsesBackgroundContext(t *testing.T) {
 		t.Fatal("OnEventReceived never fired")
 	}
 }
+
+func TestSendWaitsForRunToCompletion(t *testing.T) {
+	testCases := []struct {
+		name string
+		send func(*Actor[StateID, EventID, Context]) error
+	}{
+		{
+			name: "Send",
+			send: func(a *Actor[StateID, EventID, Context]) error {
+				a.Send("GO")
+				return nil
+			},
+		},
+		{
+			name: "SendCtx",
+			send: func(a *Actor[StateID, EventID, Context]) error {
+				return a.SendCtx(context.Background(), "GO")
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			actionEntered := make(chan struct{})
+			release := make(chan struct{})
+			sendReturned := make(chan error, 1)
+
+			m := New[StateID, EventID, Context]("send_run_to_completion").
+				Initial("a").
+				State("a", func(s *StateBuilder[StateID, EventID, Context]) {
+					s.On("GO").Assign(func(c Context) Context {
+						close(actionEntered)
+						<-release
+						return c
+					}).GoTo("mid")
+				}).
+				State("mid", func(s *StateBuilder[StateID, EventID, Context]) {
+					s.Always().GoTo("done")
+				}).
+				State("done", func(_ *StateBuilder[StateID, EventID, Context]) {}).
+				Build()
+			a := Start(m, Context{})
+			t.Cleanup(func() {
+				close(release)
+				a.Stop()
+			})
+
+			go func() {
+				sendReturned <- tc.send(a)
+			}()
+			select {
+			case <-actionEntered:
+			case <-time.After(time.Second):
+				t.Fatal("event action did not start")
+			}
+
+			// The action has begun, so the event is in flight. Its sender must
+			// remain blocked until the action and the following Always settle.
+			select {
+			case err := <-sendReturned:
+				t.Fatalf("send returned before run-to-completion: %v", err)
+			case <-time.After(25 * time.Millisecond):
+			}
+
+			close(release)
+			select {
+			case err := <-sendReturned:
+				if err != nil {
+					t.Fatalf("send returned error: %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("send did not return after run-to-completion")
+			}
+			if got := a.State(); got != "done" {
+				t.Fatalf("state after send = %q, want done", got)
+			}
+		})
+	}
+}
