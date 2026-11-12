@@ -608,6 +608,17 @@ actor := gstate.Start(machine, MyData{}, machine.WithServiceActivation(false))
 // ... wire up dependencies, send setup events, inspect state ...
 actor.Activate() // now Invoke / After services start
 ```
+- `WithRaiseHandler(fn)` — receive events raised by transitions with `.Raise(event)`. Use it to notify an external system from any transition, e.g. `s.After(d).Raise(event)`. Without `GoTo`, the transition raises without leaving its state. `Raise` runs after the transition's `Assign` actions, and repeated calls raise in declaration order. `fn` runs on the goroutine that ran the transition, after the actor lock is released, so it may call `actor.Send`. Raised events are not fed back into the actor, and without a handler they are discarded. Exports show them as `<send event="…"/>` in SCXML and `/ raise …` in Mermaid.
+
+```go
+s.After(30 * time.Second).Raise("HEARTBEAT_MISSED")       // stay in state, notify
+s.On("SUBMIT").Raise("ORDER_PLACED").GoTo("processing")   // notify and transition
+
+actor := gstate.Start(machine, MyData{}, machine.WithRaiseHandler(
+    func(ctx context.Context, e gstate.RaisedEvent[State, Event]) {
+        bus.Publish(ctx, string(e.Event)) // e.ActorID, e.State also available
+    }))
+```
 
 ### Actor Identity
 
