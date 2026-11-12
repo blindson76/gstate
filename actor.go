@@ -94,6 +94,12 @@ type Actor[S ~string, E ~string, D Cloner[D]] struct {
 	// (state exited or re-entered) are skipped on Activate.
 	deferredServices map[S]uint64
 
+	// raiseHandler receives events raised by transitions. Nil discards them.
+	raiseHandler func(context.Context, RaisedEvent[S, E])
+	// pendingRaises buffers raised events under the actor lock; they are
+	// dispatched by unlockAndDispatch after the lock is released.
+	pendingRaises []pendingRaise[S, E]
+
 	// sortedActive caches the result of getSortedActiveStatesLocked.
 	// Maintained strictly under the actor's write lock (a.mu.Lock()):
 	// invalidated whenever a.active is mutated and rebuilt under the write lock
@@ -118,6 +124,12 @@ type config[S ~string, E ~string, D Cloner[D]] struct {
 	hydrateServices    bool
 	hydrateServicesSet bool
 	deferServices      bool
+	raiseHandler       func(context.Context, RaisedEvent[S, E])
+}
+
+type pendingRaise[S ~string, E ~string] struct {
+	ctx   context.Context
+	event RaisedEvent[S, E]
 }
 
 // Option configures an [Actor] at [Start] or [Hydrate] time. Options are
@@ -188,6 +200,21 @@ func (m *Machine[S, E, D]) WithServiceActivation(enabled bool) Option[S, E, D] {
 	return func(c *config[S, E, D]) { c.deferServices = !enabled }
 }
 
+// WithRaiseHandler returns an [Option] for [Start] and [Hydrate] that installs
+// fn as the receiver of events raised by transitions configured with
+// [TransitionBuilder.Raise] (for example s.After(d).Raise(event)).
+//
+// fn is called synchronously on the goroutine that ran the transition, after
+// the actor lock is released, so it may call [Actor.Send] or other actor
+// methods. Events raised within one step (an event, timer, invoke completion
+// or mutate, including the eventless transitions it triggers) are delivered in
+// order; steps running on different goroutines may deliver concurrently. fn
+// receives the context of the triggering step. A slow fn delays the actor's
+// next step on that goroutine. Without a handler, raised events are discarded.
+func (m *Machine[S, E, D]) WithRaiseHandler(fn func(ctx context.Context, e RaisedEvent[S, E])) Option[S, E, D] {
+	return func(c *config[S, E, D]) { c.raiseHandler = fn }
+}
+
 // Start creates and launches a new [Actor] for the given machine. Options are
 // applied in order; later values for the same option win. The returned Actor
 // is already running and ready to receive events via [Actor.Send] or
@@ -226,6 +253,7 @@ func Start[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], initialData D
 
 		servicesActive:   !cfg.deferServices,
 		deferredServices: make(map[S]uint64),
+		raiseHandler:     cfg.raiseHandler,
 	}
 	a.installObservers(cfg.observers)
 
@@ -239,7 +267,7 @@ func Start[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], initialData D
 	// If the Initial chain landed on a top-level "done" state, initiate
 	// shutdown synchronously before releasing the lock.
 	a.checkAndInitiateAutoStopLocked()
-	a.mu.Unlock()
+	a.unlockAndDispatch()
 
 	a.wg.Add(1)
 	go a.loop()
@@ -360,6 +388,7 @@ func Hydrate[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], snapshot Sn
 
 		servicesActive:   !cfg.deferServices,
 		deferredServices: make(map[S]uint64),
+		raiseHandler:     cfg.raiseHandler,
 	}
 	a.installObservers(cfg.observers)
 
@@ -388,7 +417,7 @@ func Hydrate[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], snapshot Sn
 	// If the hydrated configuration has reached a "done" state, initiate
 	// shutdown synchronously before releasing the lock.
 	a.checkAndInitiateAutoStopLocked()
-	a.mu.Unlock()
+	a.unlockAndDispatch()
 
 	a.wg.Add(1)
 	go a.loop()
@@ -754,7 +783,7 @@ func (a *Actor[S, E, D]) restartServices(ctx context.Context, id S) {
 
 		mutate := func(fn func(D) D) {
 			a.mu.Lock()
-			defer a.mu.Unlock()
+			defer a.unlockAndDispatch()
 			select {
 			case <-a.stopped:
 				return
@@ -1092,7 +1121,7 @@ func (a *Actor[S, E, D]) loop() {
 
 func (a *Actor[S, E, D]) handleEvent(ctx context.Context, event E, mutate func(D) D) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
+	defer a.unlockAndDispatch()
 
 	select {
 	case <-a.stopped:
@@ -1276,6 +1305,7 @@ func (a *Actor[S, E, D]) executeTransition(ctx context.Context, sourceID S, t *T
 				}
 			}
 		}
+		a.queueRaisesLocked(ctx, sourceID, t.Raise)
 		if len(a.transitionObs) > 0 {
 			e := a.newTransitionEvent(sourceID, "", event)
 			for _, o := range a.transitionObs {
@@ -1348,6 +1378,7 @@ func (a *Actor[S, E, D]) executeTransition(ctx context.Context, sourceID S, t *T
 			}
 		}
 	}
+	a.queueRaisesLocked(ctx, sourceID, t.Raise)
 
 	// Enter the explicit target path and initialize all unselected regions.
 	offset := 0
@@ -1361,6 +1392,31 @@ func (a *Actor[S, E, D]) executeTransition(ctx context.Context, sourceID S, t *T
 		for _, o := range a.transitionObs {
 			o.OnTransition(ctx, e)
 		}
+	}
+}
+
+// queueRaisesLocked buffers events raised by a transition for delivery after
+// the actor lock is released. Must be called with a.mu held.
+func (a *Actor[S, E, D]) queueRaisesLocked(ctx context.Context, sourceID S, events []E) {
+	if a.raiseHandler == nil {
+		return
+	}
+	for _, ev := range events {
+		a.pendingRaises = append(a.pendingRaises, pendingRaise[S, E]{
+			ctx:   ctx,
+			event: RaisedEvent[S, E]{ActorID: a.id, State: sourceID, Event: ev},
+		})
+	}
+}
+
+// unlockAndDispatch releases the actor lock and then delivers any events
+// raised while it was held. Must be called with a.mu held.
+func (a *Actor[S, E, D]) unlockAndDispatch() {
+	pending := a.pendingRaises
+	a.pendingRaises = nil
+	a.mu.Unlock()
+	for _, p := range pending {
+		a.raiseHandler(p.ctx, p.event)
 	}
 }
 
@@ -1396,7 +1452,7 @@ func (a *Actor[S, E, D]) enterSingleState(ctx context.Context, id S) {
 // executeInternalTransition handles transitions triggered by services (invokes/timers).
 func (a *Actor[S, E, D]) executeInternalTransition(ctx context.Context, sourceID S, gen uint64, t *TransitionDef[S, E, D]) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
+	defer a.unlockAndDispatch()
 
 	select {
 	case <-a.stopped:

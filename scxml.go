@@ -175,6 +175,7 @@ type SCXMLTransition struct {
 	Cond    string         `xml:"cond,attr,omitempty"`
 	Target  string         `xml:"target,attr,omitempty"`
 	Assign  []*SCXMLAssign `xml:"assign,omitempty"`
+	Send    []*SCXMLSend   `xml:"send,omitempty"`
 }
 
 // SCXMLOnEntry wraps executable content on state entry.
@@ -452,6 +453,9 @@ func convertTransition[S ~string, E ~string, D Cloner[D]](t *TransitionDef[S, E,
 	}
 	if t.Action != nil {
 		tr.Assign = []*SCXMLAssign{{Location: t.actionName}}
+	}
+	for _, ev := range t.Raise {
+		tr.Send = append(tr.Send, &SCXMLSend{Event: string(ev)})
 	}
 	return tr
 }

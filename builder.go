@@ -679,6 +679,21 @@ func (t *TransitionBuilder[S, E, D]) Assign(fn func(D) D) *TransitionBuilder[S, 
 	return t
 }
 
+// Raise appends an event that is emitted to the external system when the
+// transition fires, after its Assign actions run. Repeated calls raise events
+// in declaration order. Empty events are ignored. A transition without GoTo
+// raises without leaving its state, e.g. s.After(d).Raise(event).
+//
+// Raised events are delivered to the handler installed with
+// [Machine.WithRaiseHandler]; with no handler they are discarded.
+func (t *TransitionBuilder[S, E, D]) Raise(event E) *TransitionBuilder[S, E, D] {
+	if event == "" {
+		return t
+	}
+	t.def.Raise = append(t.def.Raise, event)
+	return t
+}
+
 // ActionLabel sets an optional label for the action.
 func (t *TransitionBuilder[S, E, D]) ActionLabel(name string) *TransitionBuilder[S, E, D] {
 	t.def.actionName = name
