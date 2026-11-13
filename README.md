@@ -620,6 +620,18 @@ actor := gstate.Start(machine, MyData{}, machine.WithRaiseHandler(
     }))
 ```
 
+An `Invoke` service can raise events while it runs by calling `gstate.Raise(ctx, event)` with the context it was given. The event reaches the same handler before `Raise` returns, with the invoke's state as `e.State`. `Raise` returns `false` and delivers nothing when there is no handler, or when the invoke has finished, its state has exited or the actor has stopped.
+
+```go
+s.Invoke(func(ctx context.Context, snap MyData, mutate func(func(MyData) MyData)) error {
+    for i, chunk := range snap.Chunks {
+        upload(ctx, chunk)
+        gstate.Raise(ctx, Event(fmt.Sprintf("UPLOADED_%d", i)))
+    }
+    return nil
+}, "done", "failed")
+```
+
 ### Actor Identity
 
 Every actor is born with a stable `ActorID`. When you don't supply one via `WithActorID`, `Start` generates a short URL-safe nanoid:

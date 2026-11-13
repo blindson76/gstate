@@ -157,6 +157,9 @@ type InvokeDef[S ~string, E ~string, D Cloner[D]] struct {
 	//   cancellation. mutate must not be called from a lock-held actor callback.
 	//   It no-ops after invocation completion, state exit, or actor shutdown.
 	//
+	// To notify an external system while running, call [Raise] with ctx; the
+	// event goes to the handler installed with [Machine.WithRaiseHandler].
+	//
 	// Func must not synchronously call Stop on its actor; Stop waits for Func
 	// to return. Schedule Stop from another goroutine when needed.
 	//
