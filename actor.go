@@ -804,6 +804,23 @@ func (a *Actor[S, E, D]) restartServices(ctx context.Context, id S) {
 			a.checkAndInitiateAutoStopLocked()
 		}
 
+		raiser := invokeRaiser(func(rctx context.Context, event string) bool {
+			a.mu.Lock()
+			defer a.unlockAndDispatch()
+			select {
+			case <-a.stopped:
+				return false
+			default:
+			}
+			// Same validity window as mutate: reject once the invoke has finished,
+			// its state has exited, or a newer entry has superseded it.
+			if a.invokeGens[id] != gen || a.raiseHandler == nil {
+				return false
+			}
+			a.queueRaisesLocked(rctx, id, []E{E(event)})
+			return true
+		})
+
 		if len(a.invokeStartedObs) > 0 {
 			e := a.newInvokeEvent(id, nil, 0)
 			e.Timestamp = start
@@ -814,7 +831,7 @@ func (a *Actor[S, E, D]) restartServices(ctx context.Context, id S) {
 		a.wg.Add(1)
 		go func(sID S, entryGen uint64, invoke *InvokeDef[S, E, D], snap D, mutate func(func(D) D)) {
 			defer a.wg.Done()
-			err := invoke.Func(invokeCtx, snap, mutate)
+			err := invoke.Func(context.WithValue(invokeCtx, invokeRaiserKey{}, raiser), snap, mutate)
 			completedAt := time.Now()
 
 			// Invalidate mutate token as soon as Invoke.Func finishes so background
@@ -1393,6 +1410,35 @@ func (a *Actor[S, E, D]) executeTransition(ctx context.Context, sourceID S, t *T
 			o.OnTransition(ctx, e)
 		}
 	}
+}
+
+// invokeRaiserKey is the context key under which an invoke's raiser is stored.
+type invokeRaiserKey struct{}
+
+// invokeRaiser raises an event on behalf of a running invoke. The event is
+// passed as a string so [Raise] works with untyped constants and any E.
+type invokeRaiser func(ctx context.Context, event string) bool
+
+// Raise emits event to the external system from inside an [InvokeDef.Func].
+// ctx must be the context passed to Func, or one derived from it. The event is
+// delivered to the handler installed with [Machine.WithRaiseHandler], with the
+// invoke's state as [RaisedEvent.State], before Raise returns. Raised events
+// are not fed back into the actor.
+//
+// The event is converted to the machine's event type, so untyped string
+// constants work: Raise(ctx, "PROGRESS").
+//
+// Raise reports whether the event was delivered. It returns false, without
+// delivering, when ctx does not come from an invoke, the event is empty, no
+// raise handler is installed, or the invoke has finished, its state has exited
+// or the actor has stopped. Like mutate, Raise must not be called from a
+// lock-held actor callback.
+func Raise[E ~string](ctx context.Context, event E) bool {
+	raiser, ok := ctx.Value(invokeRaiserKey{}).(invokeRaiser)
+	if !ok || event == "" {
+		return false
+	}
+	return raiser(ctx, string(event))
 }
 
 // queueRaisesLocked buffers events raised by a transition for delivery after
