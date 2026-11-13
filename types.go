@@ -134,6 +134,9 @@ type RaisedEvent[S ~string, E ~string] struct {
 	State S
 	// Event is the raised event.
 	Event E
+	// Err is the service error for events raised by [InvokeBuilder.RaiseOnError];
+	// nil otherwise.
+	Err error
 }
 
 // InvokeDef defines an asynchronous service managed during a state's lifecycle.
@@ -165,10 +168,20 @@ type InvokeDef[S ~string, E ~string, D Cloner[D]] struct {
 	//
 	// This field was previously named Src.
 	Func func(ctx context.Context, snap D, mutate func(func(D) D)) error
+	// Run is the handle-based form of Func, set by [StateBuilder.InvokeWith].
+	// When Run is non-nil it is used instead of Func. The [InvokeHandle]
+	// offers typed Mutate, Raise and atomic Update.
+	Run func(ctx context.Context, snap D, h *InvokeHandle[S, E, D]) error
 	// OnDone is the target state when Func returns nil.
 	OnDone S
 	// OnError is the target state when Func returns a non-nil error.
 	OnError S
+	// DoneRaise lists events raised to the external system when the service
+	// returns nil, whether or not OnDone has a target.
+	DoneRaise []E
+	// ErrorRaise lists events raised to the external system when the service
+	// returns an error, whether or not OnError has a target.
+	ErrorRaise []E
 
 	// label is a human-readable label for this invocation, used in Mermaid output.
 	label string

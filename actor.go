@@ -781,44 +781,10 @@ func (a *Actor[S, E, D]) restartServices(ctx context.Context, id S) {
 		snap := a.data.Clone()
 		start := time.Now()
 
-		mutate := func(fn func(D) D) {
-			a.mu.Lock()
-			defer a.unlockAndDispatch()
-			select {
-			case <-a.stopped:
-				return
-			default:
-			}
-			// Reject mutations if the invoke has finished, the state has exited,
-			// or a new entry has superseded this invoke's generation.
-			if a.invokeGens[id] != gen {
-				return
-			}
-			// Treat a committed invoke update as an eventless targetless action.
-			// Reuse transition notifications and settle before mutate returns.
-			ctx := context.WithoutCancel(invokeCtx)
-			var zero E
-			a.executeTransition(ctx, id, &TransitionDef[S, E, D]{Action: fn}, zero)
-			a.stabilizeLocked(ctx)
-			a.getSortedActiveStatesLocked()
-			a.checkAndInitiateAutoStopLocked()
-		}
-
+		handle := &InvokeHandle[S, E, D]{a: a, state: id, gen: gen, ctx: context.WithoutCancel(invokeCtx)}
+		mutate := func(fn func(D) D) { handle.Mutate(fn) }
 		raiser := invokeRaiser(func(rctx context.Context, event string) bool {
-			a.mu.Lock()
-			defer a.unlockAndDispatch()
-			select {
-			case <-a.stopped:
-				return false
-			default:
-			}
-			// Same validity window as mutate: reject once the invoke has finished,
-			// its state has exited, or a newer entry has superseded it.
-			if a.invokeGens[id] != gen || a.raiseHandler == nil {
-				return false
-			}
-			a.queueRaisesLocked(rctx, id, []E{E(event)})
-			return true
+			return handle.raise(rctx, []E{E(event)})
 		})
 
 		if len(a.invokeStartedObs) > 0 {
@@ -831,7 +797,13 @@ func (a *Actor[S, E, D]) restartServices(ctx context.Context, id S) {
 		a.wg.Add(1)
 		go func(sID S, entryGen uint64, invoke *InvokeDef[S, E, D], snap D, mutate func(func(D) D)) {
 			defer a.wg.Done()
-			err := invoke.Func(context.WithValue(invokeCtx, invokeRaiserKey{}, raiser), snap, mutate)
+			fnCtx := context.WithValue(invokeCtx, invokeRaiserKey{}, raiser)
+			var err error
+			if invoke.Run != nil {
+				err = invoke.Run(fnCtx, snap, handle)
+			} else {
+				err = invoke.Func(fnCtx, snap, mutate)
+			}
 			completedAt := time.Now()
 
 			// Invalidate mutate token as soon as Invoke.Func finishes so background
@@ -859,12 +831,12 @@ func (a *Actor[S, E, D]) restartServices(ctx context.Context, id S) {
 			if invokeCtx.Err() != nil {
 				return // cancelled by state exit
 			}
-			target := invoke.OnDone
+			target, raises := invoke.OnDone, invoke.DoneRaise
 			if err != nil {
-				target = invoke.OnError
+				target, raises = invoke.OnError, invoke.ErrorRaise
 			}
-			if target != "" {
-				a.executeInternalTransition(context.WithoutCancel(invokeCtx), sID, entryGen, &TransitionDef[S, E, D]{Target: target})
+			if target != "" || len(raises) > 0 {
+				a.completeInvoke(context.WithoutCancel(invokeCtx), sID, entryGen, target, raises, err)
 			}
 		}(id, gen, stateDef.Invoke, snap, mutate)
 	}
@@ -1322,7 +1294,7 @@ func (a *Actor[S, E, D]) executeTransition(ctx context.Context, sourceID S, t *T
 				}
 			}
 		}
-		a.queueRaisesLocked(ctx, sourceID, t.Raise)
+		a.queueRaisesLocked(ctx, sourceID, t.Raise, nil)
 		if len(a.transitionObs) > 0 {
 			e := a.newTransitionEvent(sourceID, "", event)
 			for _, o := range a.transitionObs {
@@ -1395,7 +1367,7 @@ func (a *Actor[S, E, D]) executeTransition(ctx context.Context, sourceID S, t *T
 			}
 		}
 	}
-	a.queueRaisesLocked(ctx, sourceID, t.Raise)
+	a.queueRaisesLocked(ctx, sourceID, t.Raise, nil)
 
 	// Enter the explicit target path and initialize all unselected regions.
 	offset := 0
@@ -1443,14 +1415,14 @@ func Raise[E ~string](ctx context.Context, event E) bool {
 
 // queueRaisesLocked buffers events raised by a transition for delivery after
 // the actor lock is released. Must be called with a.mu held.
-func (a *Actor[S, E, D]) queueRaisesLocked(ctx context.Context, sourceID S, events []E) {
+func (a *Actor[S, E, D]) queueRaisesLocked(ctx context.Context, sourceID S, events []E, err error) {
 	if a.raiseHandler == nil {
 		return
 	}
 	for _, ev := range events {
 		a.pendingRaises = append(a.pendingRaises, pendingRaise[S, E]{
 			ctx:   ctx,
-			event: RaisedEvent[S, E]{ActorID: a.id, State: sourceID, Event: ev},
+			event: RaisedEvent[S, E]{ActorID: a.id, State: sourceID, Event: ev, Err: err},
 		})
 	}
 }
@@ -1526,6 +1498,34 @@ func (a *Actor[S, E, D]) executeInternalTransition(ctx context.Context, sourceID
 	}
 
 	a.executeTransition(ctx, sourceID, t, zero)
+	a.stabilizeLocked(ctx)
+	a.getSortedActiveStatesLocked()
+	a.checkAndInitiateAutoStopLocked()
+}
+
+// completeInvoke runs an invoke's completion step: it raises the route's
+// completion events (carrying err) and, when target is set, transitions there.
+// Raised events are dispatched after the lock is released, so the handler sees
+// the committed transition.
+func (a *Actor[S, E, D]) completeInvoke(ctx context.Context, sourceID S, gen uint64, target S, raises []E, err error) {
+	a.mu.Lock()
+	defer a.unlockAndDispatch()
+
+	select {
+	case <-a.stopped:
+		return
+	default:
+	}
+	if !a.active[sourceID] || a.stateGens[sourceID] != gen {
+		return
+	}
+
+	a.queueRaisesLocked(ctx, sourceID, raises, err)
+	if target == "" {
+		return
+	}
+	var zero E
+	a.executeTransition(ctx, sourceID, &TransitionDef[S, E, D]{Target: target}, zero)
 	a.stabilizeLocked(ctx)
 	a.getSortedActiveStatesLocked()
 	a.checkAndInitiateAutoStopLocked()
