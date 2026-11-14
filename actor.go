@@ -103,6 +103,9 @@ type Actor[S ~string, E ~string, D Cloner[D]] struct {
 	// internalQueue holds events raised with Internal, processed by
 	// drainInternalLocked before the step that raised them releases the lock.
 	internalQueue []internalEvent[E]
+	// internalViaHandler routes internal events only to raiseHandler instead
+	// of processing them locally (see WithInternalViaHandler).
+	internalViaHandler bool
 	// currentEvent is the event being handled, read by GuardEvent and
 	// AssignEvent callbacks. It is the zero Event during eventless steps.
 	currentEvent Event[E]
@@ -117,10 +120,11 @@ type Actor[S ~string, E ~string, D Cloner[D]] struct {
 // envelope carries an event together with the request-scoped context and
 // optional transactional payload mutator that originated it through the actor's mailbox.
 type envelope[E ~string, D any] struct {
-	ctx    context.Context
-	event  E
-	params Params
-	mutate func(D) D
+	ctx      context.Context
+	event    E
+	params   Params
+	internal bool
+	mutate   func(D) D
 }
 
 // config holds the resolved configuration for an [Actor]. It is built by
@@ -133,6 +137,7 @@ type config[S ~string, E ~string, D Cloner[D]] struct {
 	hydrateServicesSet bool
 	deferServices      bool
 	raiseHandler       func(context.Context, RaisedEvent[S, E])
+	internalViaHandler bool
 }
 
 type pendingRaise[S ~string, E ~string] struct {
@@ -223,6 +228,25 @@ func (m *Machine[S, E, D]) WithRaiseHandler(fn func(ctx context.Context, e Raise
 	return func(c *config[S, E, D]) { c.raiseHandler = fn }
 }
 
+// WithInternalViaHandler returns an [Option] for [Start] and [Hydrate] that
+// controls where events raised with [Internal] are processed.
+//
+// By default (false) the actor processes internal events itself and also
+// hands each one to the raise handler, with [RaisedEvent.Internal] set, after
+// the step that raised it. The handler can then forward it to other systems.
+//
+// With true, the actor does not process internal events itself: they go only
+// to the raise handler, which must route them back with [Actor.SendCtxEvent].
+// This lets every replica of a replicated machine (for example behind
+// raft.Apply) apply internal events from the same ordered log, so all
+// replicas see the same event sequence. Routed-back events keep their
+// parameters and internal flag but are processed in mailbox order, and the
+// internal event budget no longer applies. Without a raise handler, internal
+// events are processed locally regardless of this option.
+func (m *Machine[S, E, D]) WithInternalViaHandler(enabled bool) Option[S, E, D] {
+	return func(c *config[S, E, D]) { c.internalViaHandler = enabled }
+}
+
 // Start creates and launches a new [Actor] for the given machine. Options are
 // applied in order; later values for the same option win. The returned Actor
 // is already running and ready to receive events via [Actor.Send] or
@@ -259,9 +283,10 @@ func Start[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], initialData D
 		done:        make(chan struct{}),
 		id:          cfg.actorID,
 
-		servicesActive:   !cfg.deferServices,
-		deferredServices: make(map[S]uint64),
-		raiseHandler:     cfg.raiseHandler,
+		servicesActive:     !cfg.deferServices,
+		deferredServices:   make(map[S]uint64),
+		raiseHandler:       cfg.raiseHandler,
+		internalViaHandler: cfg.internalViaHandler,
 	}
 	a.installObservers(cfg.observers)
 
@@ -394,9 +419,10 @@ func Hydrate[S ~string, E ~string, D Cloner[D]](m *Machine[S, E, D], snapshot Sn
 		done:        make(chan struct{}),
 		id:          id,
 
-		servicesActive:   !cfg.deferServices,
-		deferredServices: make(map[S]uint64),
-		raiseHandler:     cfg.raiseHandler,
+		servicesActive:     !cfg.deferServices,
+		deferredServices:   make(map[S]uint64),
+		raiseHandler:       cfg.raiseHandler,
+		internalViaHandler: cfg.internalViaHandler,
 	}
 	a.installObservers(cfg.observers)
 
@@ -1085,6 +1111,22 @@ func (a *Actor[S, E, D]) SendCtxParams(ctx context.Context, event E, params Para
 //     exit, transition Assign, and entry actions run.
 //   - If no transition fires (the event is dropped), the mutation is discarded
 //     and the actor's data remains unchanged.
+//
+// SendEvent enqueues ev using [context.Background]. See [Actor.SendCtxEvent].
+func (a *Actor[S, E, D]) SendEvent(ev Event[E]) {
+	_ = a.SendCtxEvent(context.Background(), ev)
+}
+
+// SendCtxEvent enqueues ev, with its parameters and internal flag, with the
+// same context and return semantics as [Actor.SendCtx]. Use it to route back
+// events received by the raise handler ([RaisedEvent.AsEvent]), for example
+// after they are committed to a replicated log. The event is processed in
+// mailbox order; Internal only marks it for guards, actions and observers.
+// ev.Params is copied before it is enqueued.
+func (a *Actor[S, E, D]) SendCtxEvent(ctx context.Context, ev Event[E]) error {
+	return a.send(ctx, envelope[E, D]{ctx: ctx, event: ev.Name, params: maps.Clone(ev.Params), internal: ev.Internal})
+}
+
 func (a *Actor[S, E, D]) SendCtxWith(ctx context.Context, event E, fn func(D) D) error {
 	return a.send(ctx, envelope[E, D]{ctx: ctx, event: event, mutate: fn})
 }
@@ -1131,7 +1173,7 @@ func (a *Actor[S, E, D]) loop() {
 		}
 		select {
 		case env := <-a.mailbox:
-			a.handleEvent(env.ctx, Event[E]{Name: env.event, Params: env.params}, env.mutate)
+			a.handleEvent(env.ctx, Event[E]{Name: env.event, Params: env.params, Internal: env.internal}, env.mutate)
 		case <-a.stopped:
 			return
 		}

@@ -29,9 +29,11 @@ func (h *InvokeHandle[S, E, D]) Mutate(fn func(D) D) bool {
 
 // Raise emits event with the given options, like [TransitionBuilder.Raise]:
 // external by default, or back into the actor with [Internal], with optional
-// [Params]. External events reach the raise handler, and internal events are
-// processed with any transitions they trigger, before Raise returns; the
-// invoke's state is the raising state. Raise reports whether the event was
+// [Params]. Before Raise returns, internal events are processed with any
+// transitions they trigger (unless [Machine.WithInternalViaHandler] routes
+// them only to the handler), and every event, internal or external, has
+// reached the raise handler if one is installed. The invoke's state is the
+// raising state. Raise reports whether the event was
 // delivered or queued; it returns false when the handle is stale, the event
 // is empty, or an external event has no raise handler.
 func (h *InvokeHandle[S, E, D]) Raise(event E, opts ...RaiseOption) bool {

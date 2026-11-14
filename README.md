@@ -617,7 +617,7 @@ A transition can raise events with `.Raise(event, options...)`. Raised events ru
 Each event goes to one of two destinations:
 
 - **`gstate.External`** (the default) sends the event to the handler installed with `WithRaiseHandler`. The handler runs on the goroutine that ran the step, after the actor lock is released, so it can call `actor.Send`. Without a handler, external events are discarded.
-- **`gstate.Internal`** feeds the event back into the actor, like SCXML `<raise>`. The actor processes internal events in order after the current step settles, including its `Always` transitions, and before the next mailbox event. They need no handler. If one step raises more than 10,000 internal events, which usually means a cycle, the actor stops and `Err()` returns `ErrInternalEventLimit`.
+- **`gstate.Internal`** feeds the event back into the actor, like SCXML `<raise>`. The actor processes internal events in order after the current step settles, including its `Always` transitions, and before the next mailbox event. They need no handler, but an installed handler receives them too, after the step, with `e.Internal == true`, so it can forward them elsewhere. If one step raises more than 10,000 internal events, which usually means a cycle, the actor stops and `Err()` returns `ErrInternalEventLimit`.
 
 Events can carry **parameters** as a `gstate.Params` map. Give them as an option, or compute them from data with `RaiseWith`, whose keys override the static ones. Parameter maps are copied for every delivery.
 
@@ -648,6 +648,38 @@ actor.SendParams("ATTEMPT", gstate.Params{"n": 1})
 Observers see parameters and the internal flag on `EventNotice.Params` and `EventNotice.Internal`.
 
 Exports show raised events too. In SCXML, external events become `<send event="…">`. Internal events without parameters become `<raise event="…"/>`, and internal events with parameters become `<send target="#_internal">`. Static parameters are exported as `<param>`. In Mermaid, labels read `/ raise …` for external events and `/ raise internal …` for internal ones.
+
+#### Replicating internal events (e.g. Raft)
+
+To keep several machine instances in sync, pass `WithInternalViaHandler(true)`. The actor then skips processing internal events itself and only hands them to the handler. The handler commits them to an ordered log (for example with `raft.Apply`), and every replica's log-apply step feeds each committed entry back with `actor.SendCtxEvent(ctx, e.AsEvent())`. Every replica then processes the same events in the same order. Route client commands through the log as well.
+
+```go
+actor := gstate.Start(machine, MyData{},
+    machine.WithInternalViaHandler(true),
+    machine.WithRaiseHandler(func(ctx context.Context, e gstate.RaisedEvent[State, Event]) {
+        if !e.Internal {
+            bus.Publish(ctx, string(e.Event), e.Params) // external side effects
+            return
+        }
+        cmd, _ := json.Marshal(e.AsEvent())
+        r.Apply(cmd, 0) // only the leader succeeds; followers get ErrNotLeader
+    }))
+
+// raft FSM, on every replica:
+func (f *fsm) Apply(l *raft.Log) any {
+    var ev gstate.Event[Event]
+    _ = json.Unmarshal(l.Data, &ev)
+    return f.actor.SendCtxEvent(context.Background(), ev)
+}
+```
+
+Keep the following in mind:
+
+- **Duplicates:** every replica raises the same internal events. Only the leader's `raft.Apply` succeeds, so each event reaches the log once.
+- **Ordering:** events fed back are processed in mailbox order, not ahead of other queued events. The internal event budget doesn't apply in this mode.
+- **Don't block the actor:** the handler runs on the actor's goroutine, and the FSM sends into that same actor. Don't wait on the `raft.Apply` future inside the handler, because a full mailbox would deadlock.
+- **Serialization:** `Params` values travel as JSON, so numbers come back as `float64`. Error values (`Params[gstate.ParamError]`, `e.Err`) don't serialize, so convert them to strings yourself.
+- **Without a handler:** internal events are processed locally even in this mode.
 
 #### Raising from an invoke
 
