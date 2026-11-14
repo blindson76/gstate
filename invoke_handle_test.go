@@ -31,7 +31,11 @@ func TestInvokeWithHandleRaise(t *testing.T) {
 				if h.State() != "working" {
 					t.Errorf("h.State() = %s, want working", h.State())
 				}
-				results <- h.Raise("STEP_1", "", "STEP_2") // empty events are skipped
+				ok := h.Raise("STEP_1")
+				if h.Raise("") {
+					t.Error("h.Raise(\"\") = true, want false")
+				}
+				results <- ok && h.Raise("STEP_2")
 				return nil
 			}, "done", "")
 		}).
@@ -230,7 +234,7 @@ func TestInvokeRaiseOnDone(t *testing.T) {
 		State("working", func(s *StateBuilder[StateID, EventID, Context]) {
 			s.Invoke(func(context.Context, Context, func(func(Context) Context)) error {
 				return nil
-			}, "done", "failed").RaiseOnDone("FINISHED", "CLEANUP").RaiseOnError("FAILED")
+			}, "done", "failed").RaiseOnDone("FINISHED").RaiseOnDone("CLEANUP").RaiseOnError("FAILED")
 		}).
 		State("done", func(s *StateBuilder[StateID, EventID, Context]) { s.Type(Final) }).
 		State("failed", func(s *StateBuilder[StateID, EventID, Context]) { s.Type(Final) }).

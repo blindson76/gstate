@@ -43,10 +43,10 @@ func (a *Actor[S, E, D]) flushFinalEntries() {
 }
 
 func (a *Actor[S, E, D]) completionGuard(ctx context.Context, source S, t *TransitionDef[S, E, D]) bool {
-	if t.Guard == nil {
+	if !t.hasGuard() {
 		return true
 	}
-	ok := t.Guard(a.data)
+	ok := a.guardLocked(t)
 	if len(a.guardObs) > 0 {
 		var zero E
 		e := a.newGuardEvent(source, zero, t.Target, ok)

@@ -114,10 +114,16 @@ type TransitionDef[S ~string, E ~string, D Cloner[D]] struct {
 	Action func(D) D
 	// After is the delay before a timed transition fires.
 	After time.Duration
-	// Raise lists events emitted to the external system, in order, when the
-	// transition fires. They are delivered to the handler installed with
-	// [Machine.WithRaiseHandler]; they are not fed back into this actor.
-	Raise []E
+	// EventGuard is a guard that also receives the event being handled. When
+	// set it is used instead of Guard.
+	EventGuard func(D, Event[E]) bool
+	// EventAction is an action that also receives the event being handled.
+	// When set it is used instead of Action.
+	EventAction func(D, Event[E]) D
+	// Raise lists events raised, in order, when the transition fires, after
+	// its actions. External events go to the handler installed with
+	// [Machine.WithRaiseHandler]; internal events are fed back into the actor.
+	Raise []RaiseDef[E, D]
 
 	// guardName is a human-readable label for the guard, used in SCXML export.
 	guardName string
@@ -134,6 +140,9 @@ type RaisedEvent[S ~string, E ~string] struct {
 	State S
 	// Event is the raised event.
 	Event E
+	// Params are the event's parameters, copied per delivery; nil when it has
+	// none.
+	Params Params
 	// Err is the service error for events raised by [InvokeBuilder.RaiseOnError];
 	// nil otherwise.
 	Err error
@@ -178,10 +187,10 @@ type InvokeDef[S ~string, E ~string, D Cloner[D]] struct {
 	OnError S
 	// DoneRaise lists events raised to the external system when the service
 	// returns nil, whether or not OnDone has a target.
-	DoneRaise []E
+	DoneRaise []RaiseDef[E, D]
 	// ErrorRaise lists events raised to the external system when the service
 	// returns an error, whether or not OnError has a target.
-	ErrorRaise []E
+	ErrorRaise []RaiseDef[E, D]
 
 	// label is a human-readable label for this invocation, used in Mermaid output.
 	label string

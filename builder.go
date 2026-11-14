@@ -313,11 +313,11 @@ func (m *MachineBuilder[S, E, D]) validateCompletion() error {
 					return fmt.Errorf("gstate: state %q OnDone target %q is inside its completed source subtree", id, t.Target)
 				}
 			}
-			if i < len(sd.OnDone)-1 && t.Guard == nil {
+			if i < len(sd.OnDone)-1 && !t.hasGuard() {
 				return fmt.Errorf("gstate: state %q OnDone candidate follows unconditional fallback", id)
 			}
 		}
-		if sd.OnDone[len(sd.OnDone)-1].Guard != nil {
+		if sd.OnDone[len(sd.OnDone)-1].hasGuard() {
 			return fmt.Errorf("gstate: state %q OnDone requires a final unconditional fallback", id)
 		}
 	}
@@ -667,7 +667,7 @@ func (s *StateBuilder[S, E, D]) OnDone() *TransitionBuilder[S, E, D] {
 func (s *StateBuilder[S, E, D]) ReplaceOnDone(expectedTarget S) *TransitionBuilder[S, E, D] {
 	t := &TransitionBuilder[S, E, D]{}
 	routes := s.state.OnDone
-	if len(routes) != 1 || routes[0] == nil || routes[0].Guard != nil || routes[0].Target != expectedTarget {
+	if len(routes) != 1 || routes[0] == nil || routes[0].hasGuard() || routes[0].Target != expectedTarget {
 		s.recordError("OnDone replacement requires one unconditional route targeting %q", expectedTarget)
 		return t
 	}
@@ -687,9 +687,20 @@ type TransitionBuilder[S ~string, E ~string, D Cloner[D]] struct {
 	def TransitionDef[S, E, D]
 }
 
-// Guard adds a conditional check to the transition.
+// Guard adds a conditional check to the transition. It replaces any guard set
+// earlier with Guard or GuardEvent.
 func (t *TransitionBuilder[S, E, D]) Guard(fn func(D) bool) *TransitionBuilder[S, E, D] {
 	t.def.Guard = fn
+	t.def.EventGuard = nil
+	return t
+}
+
+// GuardEvent adds a conditional check that also receives the event being
+// handled, including its [Params]. It replaces any guard set earlier with
+// Guard or GuardEvent. Eventless transitions receive the zero [Event].
+func (t *TransitionBuilder[S, E, D]) GuardEvent(fn func(D, Event[E]) bool) *TransitionBuilder[S, E, D] {
+	t.def.EventGuard = fn
+	t.def.Guard = nil
 	return t
 }
 
@@ -706,6 +717,10 @@ func (t *TransitionBuilder[S, E, D]) Assign(fn func(D) D) *TransitionBuilder[S, 
 	if fn == nil {
 		return t
 	}
+	if prev := t.def.EventAction; prev != nil {
+		t.def.EventAction = func(data D, e Event[E]) D { return fn(prev(data, e)) }
+		return t
+	}
 	previous := t.def.Action
 	if previous == nil {
 		t.def.Action = fn
@@ -715,18 +730,51 @@ func (t *TransitionBuilder[S, E, D]) Assign(fn func(D) D) *TransitionBuilder[S, 
 	return t
 }
 
-// Raise appends an event that is emitted to the external system when the
-// transition fires, after its Assign actions run. Repeated calls raise events
-// in declaration order. Empty events are ignored. A transition without GoTo
-// raises without leaving its state, e.g. s.After(d).Raise(event).
+// AssignEvent appends a data update action that also receives the event being
+// handled, including its [Params]. It composes with Assign in declaration
+// order. Eventless transitions receive the zero [Event]. Nil actions are ignored.
+func (t *TransitionBuilder[S, E, D]) AssignEvent(fn func(D, Event[E]) D) *TransitionBuilder[S, E, D] {
+	if fn == nil {
+		return t
+	}
+	switch prevEv, prev := t.def.EventAction, t.def.Action; {
+	case prevEv != nil:
+		t.def.EventAction = func(data D, e Event[E]) D { return fn(prevEv(data, e), e) }
+	case prev != nil:
+		t.def.EventAction = func(data D, e Event[E]) D { return fn(prev(data), e) }
+	default:
+		t.def.EventAction = fn
+	}
+	t.def.Action = nil
+	return t
+}
+
+// Raise appends an event raised when the transition fires, after its Assign
+// actions. Repeated calls raise in declaration order. Empty events are
+// ignored. A transition without GoTo raises without leaving its state, e.g.
+// s.After(d).Raise(event).
 //
-// Raised events are delivered to the handler installed with
-// [Machine.WithRaiseHandler]; with no handler they are discarded.
-func (t *TransitionBuilder[S, E, D]) Raise(event E) *TransitionBuilder[S, E, D] {
+// Options select the destination and add parameters:
+//
+//	s.On("GO").Raise("STARTED")                                // external (default)
+//	s.On("GO").Raise("NEXT", gstate.Internal)                  // back into this actor
+//	s.On("GO").Raise("STARTED", gstate.Params{"by": "button"}) // with parameters
+//
+// External events go to the handler installed with [Machine.WithRaiseHandler]
+// and are discarded without one. Internal events are processed by this actor
+// after the current step settles and before the next mailbox event.
+func (t *TransitionBuilder[S, E, D]) Raise(event E, opts ...RaiseOption) *TransitionBuilder[S, E, D] {
+	return t.RaiseWith(event, nil, opts...)
+}
+
+// RaiseWith is [TransitionBuilder.Raise] with parameters computed by fn from
+// the actor data after the transition's Assign actions. Keys from fn override
+// static [Params] options. A nil fn adds no dynamic parameters.
+func (t *TransitionBuilder[S, E, D]) RaiseWith(event E, fn func(D) Params, opts ...RaiseOption) *TransitionBuilder[S, E, D] {
 	if event == "" {
 		return t
 	}
-	t.def.Raise = append(t.def.Raise, event)
+	t.def.Raise = append(t.def.Raise, newRaiseDef(event, fn, opts))
 	return t
 }
 

@@ -27,23 +27,30 @@ func (h *InvokeHandle[S, E, D]) Mutate(fn func(D) D) bool {
 	return h.commit(fn, nil)
 }
 
-// Raise emits events to the handler installed with [Machine.WithRaiseHandler],
-// in order and before Raise returns, with this invoke's state as
-// [RaisedEvent.State]. Empty events are skipped. Raise reports whether any
-// event was delivered; it returns false when the handle is stale, no handler
-// is installed or no nonempty event was given.
-func (h *InvokeHandle[S, E, D]) Raise(events ...E) bool {
-	return h.raise(h.ctx, events)
+// Raise emits event with the given options, like [TransitionBuilder.Raise]:
+// external by default, or back into the actor with [Internal], with optional
+// [Params]. External events reach the raise handler, and internal events are
+// processed with any transitions they trigger, before Raise returns; the
+// invoke's state is the raising state. Raise reports whether the event was
+// delivered or queued; it returns false when the handle is stale, the event
+// is empty, or an external event has no raise handler.
+func (h *InvokeHandle[S, E, D]) Raise(event E, opts ...RaiseOption) bool {
+	return h.raise(h.ctx, event, opts)
 }
 
-// Update applies fn to the live actor data and raises events in the same
-// atomic step: the handler sees the events only after the update is
-// committed, and no other step can run in between. Events go out after fn and
-// before any eventless transitions the update triggers. Update reports whether
-// the update was committed; without a raise handler the events are discarded
-// but the update still commits.
-func (h *InvokeHandle[S, E, D]) Update(fn func(D) D, events ...E) bool {
-	return h.commit(fn, events)
+// Update applies fn to the live actor data and raises event in the same
+// atomic step: the event is raised only after the update is committed, and no
+// other step can run in between. The event goes out after fn and before any
+// eventless transitions the update triggers. Options are as for Raise; an
+// empty event raises nothing. Update reports whether the update was
+// committed; without a raise handler an external event is discarded but the
+// update still commits.
+func (h *InvokeHandle[S, E, D]) Update(fn func(D) D, event E, opts ...RaiseOption) bool {
+	var raises []RaiseDef[E, D]
+	if event != "" {
+		raises = []RaiseDef[E, D]{newRaiseDef[E, D](event, nil, opts)}
+	}
+	return h.commit(fn, raises)
 }
 
 // validLocked reports whether the handle may act. Must be called with a.mu held.
@@ -58,7 +65,7 @@ func (h *InvokeHandle[S, E, D]) validLocked() bool {
 	return h.a.invokeGens[h.state] == h.gen
 }
 
-func (h *InvokeHandle[S, E, D]) commit(fn func(D) D, events []E) bool {
+func (h *InvokeHandle[S, E, D]) commit(fn func(D) D, raises []RaiseDef[E, D]) bool {
 	a := h.a
 	a.mu.Lock()
 	defer a.unlockAndDispatch()
@@ -68,33 +75,21 @@ func (h *InvokeHandle[S, E, D]) commit(fn func(D) D, events []E) bool {
 	// A committed invoke update is an eventless targetless action. Reuse
 	// transition notifications and settle before returning.
 	var zero E
-	a.executeTransition(h.ctx, h.state, &TransitionDef[S, E, D]{Action: fn, Raise: nonEmpty(events)}, zero)
+	a.executeTransition(h.ctx, h.state, &TransitionDef[S, E, D]{Action: fn, Raise: raises}, zero)
 	a.stabilizeLocked(h.ctx)
 	a.getSortedActiveStatesLocked()
 	a.checkAndInitiateAutoStopLocked()
 	return true
 }
 
-func (h *InvokeHandle[S, E, D]) raise(ctx context.Context, events []E) bool {
+func (h *InvokeHandle[S, E, D]) raise(ctx context.Context, event E, opts []RaiseOption) bool {
 	a := h.a
 	a.mu.Lock()
 	defer a.unlockAndDispatch()
-	events = nonEmpty(events)
-	if !h.validLocked() || a.raiseHandler == nil || len(events) == 0 {
+	if event == "" || !h.validLocked() {
 		return false
 	}
-	a.queueRaisesLocked(ctx, h.state, events, nil)
-	return true
-}
-
-func nonEmpty[E ~string](events []E) []E {
-	var out []E
-	for _, ev := range events {
-		if ev != "" {
-			out = append(out, ev)
-		}
-	}
-	return out
+	return a.raiseLocked(ctx, h.state, []RaiseDef[E, D]{newRaiseDef[E, D](event, nil, opts)}, nil)
 }
 
 // InvokeBuilder configures declarative behavior of an invoke's completion.
@@ -105,20 +100,25 @@ type InvokeBuilder[S ~string, E ~string, D Cloner[D]] struct {
 	def *InvokeDef[S, E, D]
 }
 
-// RaiseOnDone appends events raised to the external system when the service
-// returns nil. They are delivered once the completion step, including the
-// OnDone transition, has committed, and are raised even when OnDone has no
-// target. Empty events are ignored. A cancelled invoke (state exited or actor
-// stopped) raises nothing.
-func (b *InvokeBuilder[S, E, D]) RaiseOnDone(events ...E) *InvokeBuilder[S, E, D] {
-	b.def.DoneRaise = append(b.def.DoneRaise, nonEmpty(events)...)
+// RaiseOnDone appends an event raised when the service returns nil. Options
+// are as for [TransitionBuilder.Raise]. The event is raised as part of the
+// completion step, even when OnDone has no target; external events reach the
+// handler once that step, including the OnDone transition, has committed. A
+// cancelled invoke (state exited or actor stopped) raises nothing. Empty
+// events are ignored. Call it again to raise more events, in order.
+func (b *InvokeBuilder[S, E, D]) RaiseOnDone(event E, opts ...RaiseOption) *InvokeBuilder[S, E, D] {
+	if event != "" {
+		b.def.DoneRaise = append(b.def.DoneRaise, newRaiseDef[E, D](event, nil, opts))
+	}
 	return b
 }
 
-// RaiseOnError appends events raised to the external system when the service
-// returns an error. Each [RaisedEvent] carries that error in Err. They are
-// raised even when OnError has no target. Empty events are ignored.
-func (b *InvokeBuilder[S, E, D]) RaiseOnError(events ...E) *InvokeBuilder[S, E, D] {
-	b.def.ErrorRaise = append(b.def.ErrorRaise, nonEmpty(events)...)
+// RaiseOnError is [InvokeBuilder.RaiseOnDone] for a service that returns an
+// error. External events carry the error in [RaisedEvent.Err]; internal events
+// carry it in their [Params] under [ParamError].
+func (b *InvokeBuilder[S, E, D]) RaiseOnError(event E, opts ...RaiseOption) *InvokeBuilder[S, E, D] {
+	if event != "" {
+		b.def.ErrorRaise = append(b.def.ErrorRaise, newRaiseDef[E, D](event, nil, opts))
+	}
 	return b
 }
