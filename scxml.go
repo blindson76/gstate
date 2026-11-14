@@ -385,16 +385,18 @@ func convertStateNode[S ~string, E ~string, D Cloner[D]](def *StateDef[S, E, D],
 	if def.Invoke != nil {
 		invokeID := string(def.ID)
 		node.Invoke = &SCXMLInvoke{ID: invokeID}
-		if def.Invoke.OnDone != "" {
+		if def.Invoke.OnDone != "" || len(def.Invoke.DoneRaise) > 0 {
 			node.Transitions = append(node.Transitions, &SCXMLTransition{
 				Event:  fmt.Sprintf("done.invoke.%s", invokeID),
 				Target: string(def.Invoke.OnDone),
+				Send:   scxmlSends(def.Invoke.DoneRaise),
 			})
 		}
-		if def.Invoke.OnError != "" {
+		if def.Invoke.OnError != "" || len(def.Invoke.ErrorRaise) > 0 {
 			node.Transitions = append(node.Transitions, &SCXMLTransition{
 				Event:  "error.platform",
 				Target: string(def.Invoke.OnError),
+				Send:   scxmlSends(def.Invoke.ErrorRaise),
 			})
 		}
 	}
@@ -454,10 +456,16 @@ func convertTransition[S ~string, E ~string, D Cloner[D]](t *TransitionDef[S, E,
 	if t.Action != nil {
 		tr.Assign = []*SCXMLAssign{{Location: t.actionName}}
 	}
-	for _, ev := range t.Raise {
-		tr.Send = append(tr.Send, &SCXMLSend{Event: string(ev)})
-	}
+	tr.Send = scxmlSends(t.Raise)
 	return tr
+}
+
+func scxmlSends[E ~string](events []E) []*SCXMLSend {
+	var sends []*SCXMLSend
+	for _, ev := range events {
+		sends = append(sends, &SCXMLSend{Event: string(ev)})
+	}
+	return sends
 }
 
 func sortedChildren[S ~string, E ~string, D Cloner[D]](def *StateDef[S, E, D]) []*StateDef[S, E, D] {

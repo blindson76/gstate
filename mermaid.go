@@ -203,19 +203,21 @@ func emitTransitions[S ~string, E ~string, D Cloner[D]](f *mm.Flowchart, def *St
 			diamondLabel := def.Invoke.label
 			f.Node(diamondID, diamondLabel, mm.ShapeDiamond)
 			f.Edge(from, diamondID, "", mm.EdgeSolid)
-			f.Edge(diamondID, mermaidID(string(def.Invoke.OnDone)), "invoke.done", mm.EdgeSolid)
-			f.Edge(diamondID, mermaidID(string(def.Invoke.OnError)), "invoke.error", mm.EdgeSolid)
+			f.Edge(diamondID, mermaidID(string(def.Invoke.OnDone)), "invoke.done"+raiseLabel(def.Invoke.DoneRaise), mm.EdgeSolid)
+			f.Edge(diamondID, mermaidID(string(def.Invoke.OnError)), "invoke.error"+raiseLabel(def.Invoke.ErrorRaise), mm.EdgeSolid)
 		case hasDone:
 			label := "invoke.done"
 			if def.Invoke.label != "" {
 				label += " [" + def.Invoke.label + "]"
 			}
+			label += raiseLabel(def.Invoke.DoneRaise)
 			f.Edge(from, mermaidID(string(def.Invoke.OnDone)), label, mm.EdgeSolid)
 		case hasError:
 			label := "invoke.error"
 			if def.Invoke.label != "" {
 				label += " [" + def.Invoke.label + "]"
 			}
+			label += raiseLabel(def.Invoke.ErrorRaise)
 			f.Edge(from, mermaidID(string(def.Invoke.OnError)), label, mm.EdgeSolid)
 		}
 	}
@@ -240,10 +242,14 @@ func transitionLabel[S ~string, E ~string, D Cloner[D]](event string, tr *Transi
 		}
 		label += " / " + name
 	}
-	for _, ev := range tr.Raise {
+	return label + raiseLabel(tr.Raise)
+}
+
+func raiseLabel[E ~string](events []E) string {
+	label := ""
+	for _, ev := range events {
 		label += fmt.Sprintf(" / raise %s", ev)
 	}
-
 	return label
 }
 

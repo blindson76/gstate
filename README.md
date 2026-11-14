@@ -620,17 +620,39 @@ actor := gstate.Start(machine, MyData{}, machine.WithRaiseHandler(
     }))
 ```
 
-An `Invoke` service can raise events while it runs by calling `gstate.Raise(ctx, event)` with the context it was given. The event reaches the same handler before `Raise` returns, with the invoke's state as `e.State`. `Raise` returns `false` and delivers nothing when there is no handler, or when the invoke has finished, its state has exited or the actor has stopped.
+An invoke can raise events in three ways.
+
+**1. Completion events (declarative).** `Invoke` and `InvokeWith` return a builder. `RaiseOnDone` and `RaiseOnError` raise events when the service finishes, even when that route has no target. They appear in SCXML (`<send>`) and Mermaid (`/ raise …`). Events from `RaiseOnError` carry the service error in `e.Err`. A cancelled invoke raises nothing.
 
 ```go
-s.Invoke(func(ctx context.Context, snap MyData, mutate func(func(MyData) MyData)) error {
+s.Invoke(syncOrders, "synced", "failed").
+    RaiseOnDone("SYNC_FINISHED").
+    RaiseOnError("SYNC_FAILED")
+```
+
+**2. Typed handle (`InvokeWith`).** The service receives an `*InvokeHandle` in place of the `mutate` callback:
+
+- `h.Raise(events...)` raises events.
+- `h.Mutate(fn)` updates data.
+- `h.Update(fn, events...)` updates data and raises in one atomic step, so the handler never sees an event before its data change.
+
+Each method returns `false` and does nothing once the invoke has finished, its state has exited or the actor has stopped. `Raise` also returns `false` when no handler is installed.
+
+```go
+s.InvokeWith(func(ctx context.Context, snap MyData, h *gstate.InvokeHandle[State, Event, MyData]) error {
     for i, chunk := range snap.Chunks {
-        upload(ctx, chunk)
-        gstate.Raise(ctx, Event(fmt.Sprintf("UPLOADED_%d", i)))
+        if err := upload(ctx, chunk); err != nil {
+            return err
+        }
+        h.Update(func(d MyData) MyData { d.Uploaded = i + 1; return d }, "CHUNK_UPLOADED")
     }
     return nil
-}, "done", "failed")
+}, "done", "failed").RaiseOnDone("UPLOAD_FINISHED")
 ```
+
+`ReplaceInvokeWith` is the labelled-replacement form of `InvokeWith`.
+
+**3. From a context (`gstate.Raise`).** Code deep in a call stack that only has the invoke's context can call `gstate.Raise(ctx, event)`. It works with both `Invoke` and `InvokeWith`, and it accepts any string type. That makes it convenient, but it isn't type-checked. Don't call `h.Mutate`, `h.Update`, `h.Raise` or `gstate.Raise` from inside a function passed to `Mutate` or `Update`, because they take the actor lock.
 
 ### Actor Identity
 

@@ -551,27 +551,63 @@ func (s *StateBuilder[S, E, D]) labelAction(kind string, labels []string, name s
 //     For details on the parameter contracts, see the documentation for InvokeDef.Func.
 //   - onDone: state to transition to on success (when fn returns nil).
 //   - onError: state to transition to on failure (when fn returns a non-nil error).
-func (s *StateBuilder[S, E, D]) Invoke(fn func(ctx context.Context, snap D, mutate func(func(D) D)) error, onDone S, onError S) {
+//
+// The returned builder adds completion events with RaiseOnDone and RaiseOnError.
+// Use [StateBuilder.InvokeWith] for a typed handle with Raise and atomic Update.
+func (s *StateBuilder[S, E, D]) Invoke(fn func(ctx context.Context, snap D, mutate func(func(D) D)) error, onDone S, onError S) *InvokeBuilder[S, E, D] {
+	return s.setInvoke(&InvokeDef[S, E, D]{Func: fn, OnDone: onDone, OnError: onError})
+}
+
+// InvokeWith configures an asynchronous service like [StateBuilder.Invoke],
+// but fn receives an [InvokeHandle] instead of a mutate callback. The handle
+// offers typed Mutate, Raise and Update (data change plus events in one atomic
+// step). A nil fn is a validation error.
+func (s *StateBuilder[S, E, D]) InvokeWith(fn func(ctx context.Context, snap D, h *InvokeHandle[S, E, D]) error, onDone S, onError S) *InvokeBuilder[S, E, D] {
+	if fn == nil {
+		s.recordError("InvokeWith requires a non-nil function")
+		return detachedInvokeBuilder[S, E, D]()
+	}
+	return s.setInvoke(&InvokeDef[S, E, D]{Run: fn, OnDone: onDone, OnError: onError})
+}
+
+func (s *StateBuilder[S, E, D]) setInvoke(def *InvokeDef[S, E, D]) *InvokeBuilder[S, E, D] {
 	if s.state.invokeSet {
 		s.recordError("invoke already configured; cannot assign another service (use ReplaceInvoke)")
-		return
+		return detachedInvokeBuilder[S, E, D]()
 	}
 	s.state.invokeSet = true
-	s.state.Invoke = &InvokeDef[S, E, D]{
-		Func:    fn,
-		OnDone:  onDone,
-		OnError: onError,
-	}
+	s.state.Invoke = def
+	return &InvokeBuilder[S, E, D]{def: def}
+}
+
+func detachedInvokeBuilder[S ~string, E ~string, D Cloner[D]]() *InvokeBuilder[S, E, D] {
+	return &InvokeBuilder[S, E, D]{def: &InvokeDef[S, E, D]{}}
 }
 
 // ReplaceInvoke replaces an existing service identified by its nonempty label.
 // Labels used for replacement are semantic contracts, not merely display text.
-func (s *StateBuilder[S, E, D]) ReplaceInvoke(expectedLabel string, fn func(context.Context, D, func(func(D) D)) error, onDone, onError S) {
+// The replacement starts without completion events; add them on the returned
+// builder. A failed replacement records an error and returns a detached builder.
+func (s *StateBuilder[S, E, D]) ReplaceInvoke(expectedLabel string, fn func(context.Context, D, func(func(D) D)) error, onDone, onError S) *InvokeBuilder[S, E, D] {
+	return s.replaceInvoke(expectedLabel, &InvokeDef[S, E, D]{Func: fn, OnDone: onDone, OnError: onError})
+}
+
+// ReplaceInvokeWith is [StateBuilder.ReplaceInvoke] for a handle-based service.
+func (s *StateBuilder[S, E, D]) ReplaceInvokeWith(expectedLabel string, fn func(context.Context, D, *InvokeHandle[S, E, D]) error, onDone, onError S) *InvokeBuilder[S, E, D] {
+	if fn == nil {
+		s.recordError("ReplaceInvokeWith requires a non-nil function")
+		return detachedInvokeBuilder[S, E, D]()
+	}
+	return s.replaceInvoke(expectedLabel, &InvokeDef[S, E, D]{Run: fn, OnDone: onDone, OnError: onError})
+}
+
+func (s *StateBuilder[S, E, D]) replaceInvoke(expectedLabel string, def *InvokeDef[S, E, D]) *InvokeBuilder[S, E, D] {
 	if expectedLabel == "" || s.state.Invoke == nil || s.state.Invoke.label != expectedLabel {
 		s.recordError("invoke replacement requires matching nonempty label %q", expectedLabel)
-		return
+		return detachedInvokeBuilder[S, E, D]()
 	}
-	s.state.Invoke = &InvokeDef[S, E, D]{Func: fn, OnDone: onDone, OnError: onError}
+	s.state.Invoke = def
+	return &InvokeBuilder[S, E, D]{def: def}
 }
 
 // InvokeLabel names the current service for diagrams and checked replacement.
