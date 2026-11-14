@@ -225,7 +225,7 @@ func emitTransitions[S ~string, E ~string, D Cloner[D]](f *mm.Flowchart, def *St
 
 func transitionLabel[S ~string, E ~string, D Cloner[D]](event string, tr *TransitionDef[S, E, D]) string {
 	label := event
-	if tr.Guard != nil {
+	if tr.hasGuard() {
 		gn := "guard"
 		if tr.guardName != "" {
 			gn = tr.guardName
@@ -235,7 +235,7 @@ func transitionLabel[S ~string, E ~string, D Cloner[D]](event string, tr *Transi
 		}
 		label += fmt.Sprintf("[%s]", gn)
 	}
-	if tr.Action != nil {
+	if tr.hasAction() {
 		name := tr.actionName
 		if name == "" {
 			name = "action"
@@ -245,10 +245,14 @@ func transitionLabel[S ~string, E ~string, D Cloner[D]](event string, tr *Transi
 	return label + raiseLabel(tr.Raise)
 }
 
-func raiseLabel[E ~string](events []E) string {
+func raiseLabel[E ~string, D any](raises []RaiseDef[E, D]) string {
 	label := ""
-	for _, ev := range events {
-		label += fmt.Sprintf(" / raise %s", ev)
+	for _, r := range raises {
+		if r.Kind == Internal {
+			label += fmt.Sprintf(" / raise internal %s", r.Event)
+		} else {
+			label += fmt.Sprintf(" / raise %s", r.Event)
+		}
 	}
 	return label
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -99,6 +100,12 @@ type Actor[S ~string, E ~string, D Cloner[D]] struct {
 	// pendingRaises buffers raised events under the actor lock; they are
 	// dispatched by unlockAndDispatch after the lock is released.
 	pendingRaises []pendingRaise[S, E]
+	// internalQueue holds events raised with Internal, processed by
+	// drainInternalLocked before the step that raised them releases the lock.
+	internalQueue []internalEvent[E]
+	// currentEvent is the event being handled, read by GuardEvent and
+	// AssignEvent callbacks. It is the zero Event during eventless steps.
+	currentEvent Event[E]
 
 	// sortedActive caches the result of getSortedActiveStatesLocked.
 	// Maintained strictly under the actor's write lock (a.mu.Lock()):
@@ -112,6 +119,7 @@ type Actor[S ~string, E ~string, D Cloner[D]] struct {
 type envelope[E ~string, D any] struct {
 	ctx    context.Context
 	event  E
+	params Params
 	mutate func(D) D
 }
 
@@ -530,11 +538,13 @@ func (a *Actor[S, E, D]) newActionEvent(state S, event E, target S) *ActionEvent
 	return e
 }
 
-func (a *Actor[S, E, D]) newEventNotice(event E, reason string) *EventNotice[S, E, D] {
+func (a *Actor[S, E, D]) newEventNotice(event Event[E], reason string) *EventNotice[S, E, D] {
 	return &EventNotice[S, E, D]{
 		MachineID: a.machine.ID,
 		ActorID:   a.id,
-		Event:     event,
+		Event:     event.Name,
+		Params:    maps.Clone(event.Params),
+		Internal:  event.Internal,
 		Reason:    reason,
 		Timestamp: time.Now(),
 	}
@@ -601,6 +611,7 @@ func (a *Actor[S, E, D]) initiateShutdownLocked() {
 		}
 		a.timers = make(map[S][]*time.Timer)
 		a.deferredServices = make(map[S]uint64)
+		a.internalQueue = nil
 
 		// Signal shutdown. Senders parked in SendCtx's select wake on the
 		// stopped channel and return without delivering. The loop goroutine
@@ -783,8 +794,8 @@ func (a *Actor[S, E, D]) restartServices(ctx context.Context, id S) {
 
 		handle := &InvokeHandle[S, E, D]{a: a, state: id, gen: gen, ctx: context.WithoutCancel(invokeCtx)}
 		mutate := func(fn func(D) D) { handle.Mutate(fn) }
-		raiser := invokeRaiser(func(rctx context.Context, event string) bool {
-			return handle.raise(rctx, []E{E(event)})
+		raiser := invokeRaiser(func(rctx context.Context, event string, opts []RaiseOption) bool {
+			return handle.raise(rctx, E(event), opts)
 		})
 
 		if len(a.invokeStartedObs) > 0 {
@@ -1052,6 +1063,20 @@ func (a *Actor[S, E, D]) SendCtx(ctx context.Context, event E) error {
 	return a.SendCtxWith(ctx, event, nil)
 }
 
+// SendParams enqueues an event with parameters using [context.Background].
+// See [Actor.SendCtxParams].
+func (a *Actor[S, E, D]) SendParams(event E, params Params) {
+	_ = a.SendCtxParams(context.Background(), event, params)
+}
+
+// SendCtxParams enqueues an event with parameters, with the same context and
+// return semantics as [Actor.SendCtx]. Guards and actions registered with
+// [TransitionBuilder.GuardEvent] and [TransitionBuilder.AssignEvent] read the
+// parameters from [Event.Params]. params is copied before it is enqueued.
+func (a *Actor[S, E, D]) SendCtxParams(ctx context.Context, event E, params Params) error {
+	return a.send(ctx, envelope[E, D]{ctx: ctx, event: event, params: maps.Clone(params)})
+}
+
 // SendCtxWith enqueues an event together with a typed payload reducer fn.
 // When the actor processes the event:
 //   - fn is applied to a cloned copy of the actor's data before transition
@@ -1061,8 +1086,13 @@ func (a *Actor[S, E, D]) SendCtx(ctx context.Context, event E) error {
 //   - If no transition fires (the event is dropped), the mutation is discarded
 //     and the actor's data remains unchanged.
 func (a *Actor[S, E, D]) SendCtxWith(ctx context.Context, event E, fn func(D) D) error {
+	return a.send(ctx, envelope[E, D]{ctx: ctx, event: event, mutate: fn})
+}
+
+func (a *Actor[S, E, D]) send(ctx context.Context, env envelope[E, D]) error {
 	if ctx == nil {
 		ctx = context.Background()
+		env.ctx = ctx
 	}
 	// Fast path: bail before enqueueing if ctx or actor is already done.
 	// Without this, the inner select could pick the mailbox-send case
@@ -1076,7 +1106,7 @@ func (a *Actor[S, E, D]) SendCtxWith(ctx context.Context, event E, fn func(D) D)
 	default:
 	}
 	select {
-	case a.mailbox <- envelope[E, D]{ctx: ctx, event: event, mutate: fn}:
+	case a.mailbox <- env:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -1101,17 +1131,22 @@ func (a *Actor[S, E, D]) loop() {
 		}
 		select {
 		case env := <-a.mailbox:
-			a.handleEvent(env.ctx, env.event, env.mutate)
+			a.handleEvent(env.ctx, Event[E]{Name: env.event, Params: env.params}, env.mutate)
 		case <-a.stopped:
 			return
 		}
 	}
 }
 
-func (a *Actor[S, E, D]) handleEvent(ctx context.Context, event E, mutate func(D) D) {
+func (a *Actor[S, E, D]) handleEvent(ctx context.Context, event Event[E], mutate func(D) D) {
 	a.mu.Lock()
 	defer a.unlockAndDispatch()
+	a.processEventLocked(ctx, event, mutate)
+}
 
+// processEventLocked runs one event, from the mailbox or the internal queue,
+// as a full step. Must be called with a.mu held.
+func (a *Actor[S, E, D]) processEventLocked(ctx context.Context, event Event[E], mutate func(D) D) {
 	select {
 	case <-a.stopped:
 		return
@@ -1130,10 +1165,14 @@ func (a *Actor[S, E, D]) handleEvent(ctx context.Context, event E, mutate func(D
 		}
 	}
 
-	selected := a.selectTransitions(ctx, event)
+	// Guards and actions of this event's transitions see it; the eventless
+	// transitions settled afterwards see the zero Event.
+	a.currentEvent = event
+	selected := a.selectTransitions(ctx, event.Name)
 	for _, candidate := range selected {
-		a.executeTransition(ctx, candidate.source, candidate.transition, event)
+		a.executeTransition(ctx, candidate.source, candidate.transition, event.Name)
 	}
+	a.currentEvent = Event[E]{}
 	if len(selected) > 0 {
 		a.stabilizeLocked(ctx)
 		a.getSortedActiveStatesLocked()
@@ -1187,8 +1226,8 @@ func (a *Actor[S, E, D]) selectTransitions(ctx context.Context, event E) []event
 			continue
 		}
 		for _, t := range a.machine.States[id].Transitions[event] {
-			if t.Guard != nil {
-				ok := t.Guard(a.data)
+			if t.hasGuard() {
+				ok := a.guardLocked(t)
 				if len(a.guardObs) > 0 {
 					e := a.newGuardEvent(id, event, t.Target, ok)
 					for _, o := range a.guardObs {
@@ -1285,8 +1324,7 @@ func (a *Actor[S, E, D]) enterTargetPath(ctx context.Context, path []S) {
 func (a *Actor[S, E, D]) executeTransition(ctx context.Context, sourceID S, t *TransitionDef[S, E, D], event E) {
 	// 1. Handle internal transitions (no target)
 	if t.Target == "" {
-		if t.Action != nil {
-			a.data = t.Action(a.data)
+		if a.actionLocked(t) {
 			if len(a.actionObs) > 0 {
 				e := a.newActionEvent(sourceID, event, "")
 				for _, o := range a.actionObs {
@@ -1294,7 +1332,7 @@ func (a *Actor[S, E, D]) executeTransition(ctx context.Context, sourceID S, t *T
 				}
 			}
 		}
-		a.queueRaisesLocked(ctx, sourceID, t.Raise, nil)
+		a.raiseLocked(ctx, sourceID, t.Raise, nil)
 		if len(a.transitionObs) > 0 {
 			e := a.newTransitionEvent(sourceID, "", event)
 			for _, o := range a.transitionObs {
@@ -1358,8 +1396,7 @@ func (a *Actor[S, E, D]) executeTransition(ctx context.Context, sourceID S, t *T
 	}
 
 	// 3. Execute transition action (Assign)
-	if t.Action != nil {
-		a.data = t.Action(a.data)
+	if a.actionLocked(t) {
 		if len(a.actionObs) > 0 {
 			e := a.newActionEvent(sourceID, event, t.Target)
 			for _, o := range a.actionObs {
@@ -1367,7 +1404,7 @@ func (a *Actor[S, E, D]) executeTransition(ctx context.Context, sourceID S, t *T
 			}
 		}
 	}
-	a.queueRaisesLocked(ctx, sourceID, t.Raise, nil)
+	a.raiseLocked(ctx, sourceID, t.Raise, nil)
 
 	// Enter the explicit target path and initialize all unselected regions.
 	offset := 0
@@ -1381,60 +1418,6 @@ func (a *Actor[S, E, D]) executeTransition(ctx context.Context, sourceID S, t *T
 		for _, o := range a.transitionObs {
 			o.OnTransition(ctx, e)
 		}
-	}
-}
-
-// invokeRaiserKey is the context key under which an invoke's raiser is stored.
-type invokeRaiserKey struct{}
-
-// invokeRaiser raises an event on behalf of a running invoke. The event is
-// passed as a string so [Raise] works with untyped constants and any E.
-type invokeRaiser func(ctx context.Context, event string) bool
-
-// Raise emits event to the external system from inside an [InvokeDef.Func].
-// ctx must be the context passed to Func, or one derived from it. The event is
-// delivered to the handler installed with [Machine.WithRaiseHandler], with the
-// invoke's state as [RaisedEvent.State], before Raise returns. Raised events
-// are not fed back into the actor.
-//
-// The event is converted to the machine's event type, so untyped string
-// constants work: Raise(ctx, "PROGRESS").
-//
-// Raise reports whether the event was delivered. It returns false, without
-// delivering, when ctx does not come from an invoke, the event is empty, no
-// raise handler is installed, or the invoke has finished, its state has exited
-// or the actor has stopped. Like mutate, Raise must not be called from a
-// lock-held actor callback.
-func Raise[E ~string](ctx context.Context, event E) bool {
-	raiser, ok := ctx.Value(invokeRaiserKey{}).(invokeRaiser)
-	if !ok || event == "" {
-		return false
-	}
-	return raiser(ctx, string(event))
-}
-
-// queueRaisesLocked buffers events raised by a transition for delivery after
-// the actor lock is released. Must be called with a.mu held.
-func (a *Actor[S, E, D]) queueRaisesLocked(ctx context.Context, sourceID S, events []E, err error) {
-	if a.raiseHandler == nil {
-		return
-	}
-	for _, ev := range events {
-		a.pendingRaises = append(a.pendingRaises, pendingRaise[S, E]{
-			ctx:   ctx,
-			event: RaisedEvent[S, E]{ActorID: a.id, State: sourceID, Event: ev, Err: err},
-		})
-	}
-}
-
-// unlockAndDispatch releases the actor lock and then delivers any events
-// raised while it was held. Must be called with a.mu held.
-func (a *Actor[S, E, D]) unlockAndDispatch() {
-	pending := a.pendingRaises
-	a.pendingRaises = nil
-	a.mu.Unlock()
-	for _, p := range pending {
-		a.raiseHandler(p.ctx, p.event)
 	}
 }
 
@@ -1484,8 +1467,8 @@ func (a *Actor[S, E, D]) executeInternalTransition(ctx context.Context, sourceID
 	}
 
 	var zero E
-	if t.Guard != nil {
-		ok := t.Guard(a.data)
+	if t.hasGuard() {
+		ok := a.guardLocked(t)
 		if len(a.guardObs) > 0 {
 			e := a.newGuardEvent(sourceID, zero, t.Target, ok)
 			for _, o := range a.guardObs {
@@ -1507,7 +1490,7 @@ func (a *Actor[S, E, D]) executeInternalTransition(ctx context.Context, sourceID
 // completion events (carrying err) and, when target is set, transitions there.
 // Raised events are dispatched after the lock is released, so the handler sees
 // the committed transition.
-func (a *Actor[S, E, D]) completeInvoke(ctx context.Context, sourceID S, gen uint64, target S, raises []E, err error) {
+func (a *Actor[S, E, D]) completeInvoke(ctx context.Context, sourceID S, gen uint64, target S, raises []RaiseDef[E, D], err error) {
 	a.mu.Lock()
 	defer a.unlockAndDispatch()
 
@@ -1520,7 +1503,7 @@ func (a *Actor[S, E, D]) completeInvoke(ctx context.Context, sourceID S, gen uin
 		return
 	}
 
-	a.queueRaisesLocked(ctx, sourceID, raises, err)
+	a.raiseLocked(ctx, sourceID, raises, err)
 	if target == "" {
 		return
 	}

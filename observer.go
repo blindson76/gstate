@@ -331,6 +331,11 @@ type EventNotice[S ~string, E ~string, D Cloner[D]] struct {
 	MachineID string  `json:"machine_id"`
 	ActorID   ActorID `json:"actor_id"`
 	Event     E       `json:"event"`
+	// Params are the event's parameters, copied for the observer; nil when
+	// the event has none.
+	Params Params `json:"params,omitempty"`
+	// Internal reports whether the event was raised with [Internal].
+	Internal bool `json:"internal,omitempty"`
 	// Reason describes why the event was dropped (e.g. "no_transition"). It is
 	// empty on OnEventReceived.
 	Reason    string    `json:"reason,omitempty"`

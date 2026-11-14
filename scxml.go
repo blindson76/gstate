@@ -3,7 +3,10 @@ package gstate
 import (
 	"encoding/xml"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -176,6 +179,7 @@ type SCXMLTransition struct {
 	Target  string         `xml:"target,attr,omitempty"`
 	Assign  []*SCXMLAssign `xml:"assign,omitempty"`
 	Send    []*SCXMLSend   `xml:"send,omitempty"`
+	Raise   []*SCXMLRaise  `xml:"raise,omitempty"`
 }
 
 // SCXMLOnEntry wraps executable content on state entry.
@@ -286,8 +290,21 @@ type SCXMLAssign struct {
 
 // SCXMLSend represents a <send> element.
 type SCXMLSend struct {
-	Event string `xml:"event,attr,omitempty"`
-	Delay string `xml:"delay,attr,omitempty"`
+	Event  string        `xml:"event,attr,omitempty"`
+	Target string        `xml:"target,attr,omitempty"`
+	Delay  string        `xml:"delay,attr,omitempty"`
+	Params []*SCXMLParam `xml:"param,omitempty"`
+}
+
+// SCXMLRaise represents a <raise> element: an internal event without data.
+type SCXMLRaise struct {
+	Event string `xml:"event,attr"`
+}
+
+// SCXMLParam represents a <param> element inside <send>.
+type SCXMLParam struct {
+	Name string `xml:"name,attr"`
+	Expr string `xml:"expr,attr,omitempty"`
 }
 
 // ToSCXML converts a gstate Machine definition into an SCXML document.
@@ -390,6 +407,7 @@ func convertStateNode[S ~string, E ~string, D Cloner[D]](def *StateDef[S, E, D],
 				Event:  fmt.Sprintf("done.invoke.%s", invokeID),
 				Target: string(def.Invoke.OnDone),
 				Send:   scxmlSends(def.Invoke.DoneRaise),
+				Raise:  scxmlRaises(def.Invoke.DoneRaise),
 			})
 		}
 		if def.Invoke.OnError != "" || len(def.Invoke.ErrorRaise) > 0 {
@@ -397,6 +415,7 @@ func convertStateNode[S ~string, E ~string, D Cloner[D]](def *StateDef[S, E, D],
 				Event:  "error.platform",
 				Target: string(def.Invoke.OnError),
 				Send:   scxmlSends(def.Invoke.ErrorRaise),
+				Raise:  scxmlRaises(def.Invoke.ErrorRaise),
 			})
 		}
 	}
@@ -446,26 +465,67 @@ func convertFinalNode[S ~string, E ~string, D Cloner[D]](def *StateDef[S, E, D],
 
 func convertTransition[S ~string, E ~string, D Cloner[D]](t *TransitionDef[S, E, D], event string) *SCXMLTransition {
 	tr := &SCXMLTransition{Event: event, Target: string(t.Target)}
-	if t.Guard != nil {
+	if t.hasGuard() {
 		if t.guardName != "" {
 			tr.Cond = t.guardName
 		} else {
 			tr.Cond = "guard"
 		}
 	}
-	if t.Action != nil {
+	if t.hasAction() {
 		tr.Assign = []*SCXMLAssign{{Location: t.actionName}}
 	}
 	tr.Send = scxmlSends(t.Raise)
+	tr.Raise = scxmlRaises(t.Raise)
 	return tr
 }
 
-func scxmlSends[E ~string](events []E) []*SCXMLSend {
+// scxmlSends exports external raises, and internal raises with parameters,
+// as <send>. Internal sends target "#_internal" (SCXML's internal queue).
+// Static parameters become <param> elements with literal expressions; dynamic
+// parameters (ParamsFunc) cannot be named statically and are not exported.
+func scxmlSends[E ~string, D any](raises []RaiseDef[E, D]) []*SCXMLSend {
 	var sends []*SCXMLSend
-	for _, ev := range events {
-		sends = append(sends, &SCXMLSend{Event: string(ev)})
+	for _, r := range raises {
+		internal := r.Kind == Internal
+		if internal && len(r.Params) == 0 && r.ParamsFunc == nil {
+			continue // exported as <raise>
+		}
+		send := &SCXMLSend{Event: string(r.Event)}
+		if internal {
+			send.Target = "#_internal"
+		}
+		for _, name := range slices.Sorted(maps.Keys(r.Params)) {
+			send.Params = append(send.Params, &SCXMLParam{Name: name, Expr: scxmlLiteral(r.Params[name])})
+		}
+		sends = append(sends, send)
 	}
 	return sends
+}
+
+// scxmlRaises exports internal raises without parameters as <raise>.
+func scxmlRaises[E ~string, D any](raises []RaiseDef[E, D]) []*SCXMLRaise {
+	var out []*SCXMLRaise
+	for _, r := range raises {
+		if r.Kind == Internal && len(r.Params) == 0 && r.ParamsFunc == nil {
+			out = append(out, &SCXMLRaise{Event: string(r.Event)})
+		}
+	}
+	return out
+}
+
+// scxmlLiteral renders a static parameter value as an ECMAScript literal.
+func scxmlLiteral(v any) string {
+	switch x := v.(type) {
+	case string:
+		return "'" + strings.ReplaceAll(strings.ReplaceAll(x, `\`, `\\`), "'", `\'`) + "'"
+	case nil:
+		return "null"
+	case bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
+		return fmt.Sprint(x)
+	default:
+		return "'" + strings.ReplaceAll(fmt.Sprint(x), "'", `\'`) + "'"
+	}
 }
 
 func sortedChildren[S ~string, E ~string, D Cloner[D]](def *StateDef[S, E, D]) []*StateDef[S, E, D] {

@@ -608,35 +608,67 @@ actor := gstate.Start(machine, MyData{}, machine.WithServiceActivation(false))
 // ... wire up dependencies, send setup events, inspect state ...
 actor.Activate() // now Invoke / After services start
 ```
-- `WithRaiseHandler(fn)` — receive events raised by transitions with `.Raise(event)`. Use it to notify an external system from any transition, e.g. `s.After(d).Raise(event)`. Without `GoTo`, the transition raises without leaving its state. `Raise` runs after the transition's `Assign` actions, and repeated calls raise in declaration order. `fn` runs on the goroutine that ran the transition, after the actor lock is released, so it may call `actor.Send`. Raised events are not fed back into the actor, and without a handler they are discarded. Exports show them as `<send event="…"/>` in SCXML and `/ raise …` in Mermaid.
+- `WithRaiseHandler(fn)` — receive the external events raised with `.Raise(...)`. See [Raising events](#raising-events).
+
+### Raising events
+
+A transition can raise events with `.Raise(event, options...)`. Raised events run after the transition's `Assign` actions, and repeated calls raise in declaration order. Without `GoTo`, the transition raises without leaving its state, so `s.After(d).Raise(event)` raises on a timer.
+
+Each event goes to one of two destinations:
+
+- **`gstate.External`** (the default) sends the event to the handler installed with `WithRaiseHandler`. The handler runs on the goroutine that ran the step, after the actor lock is released, so it can call `actor.Send`. Without a handler, external events are discarded.
+- **`gstate.Internal`** feeds the event back into the actor, like SCXML `<raise>`. The actor processes internal events in order after the current step settles, including its `Always` transitions, and before the next mailbox event. They need no handler. If one step raises more than 10,000 internal events, which usually means a cycle, the actor stops and `Err()` returns `ErrInternalEventLimit`.
+
+Events can carry **parameters** as a `gstate.Params` map. Give them as an option, or compute them from data with `RaiseWith`, whose keys override the static ones. Parameter maps are copied for every delivery.
 
 ```go
-s.After(30 * time.Second).Raise("HEARTBEAT_MISSED")       // stay in state, notify
-s.On("SUBMIT").Raise("ORDER_PLACED").GoTo("processing")   // notify and transition
+s.After(30 * time.Second).Raise("HEARTBEAT_MISSED")                          // external, stays in state
+s.On("SUBMIT").Raise("ORDER_PLACED", gstate.Params{"channel": "web"}).GoTo("processing")
+s.On("RETRY").RaiseWith("ATTEMPT", func(d MyData) gstate.Params {           // internal, params from data
+    return gstate.Params{"n": d.Attempts}
+}, gstate.Internal)
 
 actor := gstate.Start(machine, MyData{}, machine.WithRaiseHandler(
     func(ctx context.Context, e gstate.RaisedEvent[State, Event]) {
-        bus.Publish(ctx, string(e.Event)) // e.ActorID, e.State also available
+        bus.Publish(ctx, string(e.Event), e.Params) // e.ActorID, e.State, e.Err also available
     }))
 ```
 
-An invoke can raise events in three ways.
+**Reading parameters.** `GuardEvent` and `AssignEvent` work like `Guard` and `Assign`, but they also receive the `gstate.Event` being handled: its `Name`, `Params` and whether it was `Internal`. `AssignEvent` composes with `Assign` in declaration order. For a guard, the last `Guard` or `GuardEvent` call wins. Callers can send parameters with `actor.SendParams(event, params)` or `actor.SendCtxParams(ctx, event, params)`. Eventless steps see the zero `Event`: `Always`, `After`, `OnDone`, invoke completion and invoke updates.
 
-**1. Completion events (declarative).** `Invoke` and `InvokeWith` return a builder. `RaiseOnDone` and `RaiseOnError` raise events when the service finishes, even when that route has no target. They appear in SCXML (`<send>`) and Mermaid (`/ raise …`). Events from `RaiseOnError` carry the service error in `e.Err`. A cancelled invoke raises nothing.
+```go
+s.On("ATTEMPT").
+    GuardEvent(func(d MyData, e gstate.Event[Event]) bool { return e.Params["n"].(int) < 3 }).
+    AssignEvent(func(d MyData, e gstate.Event[Event]) MyData { d.Last = e.Params["n"].(int); return d }).
+    GoTo("retrying")
+
+actor.SendParams("ATTEMPT", gstate.Params{"n": 1})
+```
+
+Observers see parameters and the internal flag on `EventNotice.Params` and `EventNotice.Internal`.
+
+Exports show raised events too. In SCXML, external events become `<send event="…">`. Internal events without parameters become `<raise event="…"/>`, and internal events with parameters become `<send target="#_internal">`. Static parameters are exported as `<param>`. In Mermaid, labels read `/ raise …` for external events and `/ raise internal …` for internal ones.
+
+#### Raising from an invoke
+
+An invoke can raise events in three ways. All of them accept the same `External`/`Internal` and `Params` options.
+
+**1. Completion events (declarative).** `Invoke` and `InvokeWith` return a builder. `RaiseOnDone` and `RaiseOnError` raise events when the service finishes, even when that route has no target. External error events carry the service error in `e.Err`, and internal ones carry it in `Params[gstate.ParamError]`. A cancelled invoke raises nothing.
 
 ```go
 s.Invoke(syncOrders, "synced", "failed").
     RaiseOnDone("SYNC_FINISHED").
-    RaiseOnError("SYNC_FAILED")
+    RaiseOnError("SYNC_FAILED").
+    RaiseOnError("RETRY", gstate.Internal, gstate.Params{"backoff": "5s"})
 ```
 
 **2. Typed handle (`InvokeWith`).** The service receives an `*InvokeHandle` in place of the `mutate` callback:
 
-- `h.Raise(events...)` raises events.
+- `h.Raise(event, options...)` raises an event.
 - `h.Mutate(fn)` updates data.
-- `h.Update(fn, events...)` updates data and raises in one atomic step, so the handler never sees an event before its data change.
+- `h.Update(fn, event, options...)` updates data and raises in one atomic step, so the event never goes out before its data change.
 
-Each method returns `false` and does nothing once the invoke has finished, its state has exited or the actor has stopped. `Raise` also returns `false` when no handler is installed.
+Each method returns `false` and does nothing once the invoke has finished, its state has exited or the actor has stopped. An external `Raise` also returns `false` when no handler is installed. An internal event is processed, together with any transitions it triggers, before `Raise` returns.
 
 ```go
 s.InvokeWith(func(ctx context.Context, snap MyData, h *gstate.InvokeHandle[State, Event, MyData]) error {
@@ -644,7 +676,9 @@ s.InvokeWith(func(ctx context.Context, snap MyData, h *gstate.InvokeHandle[State
         if err := upload(ctx, chunk); err != nil {
             return err
         }
-        h.Update(func(d MyData) MyData { d.Uploaded = i + 1; return d }, "CHUNK_UPLOADED")
+        h.Update(func(d MyData) MyData { d.Uploaded = i + 1; return d },
+            "CHUNK_UPLOADED", gstate.Params{"index": i})
+        h.Raise("PROGRESS", gstate.Internal, gstate.Params{"pct": 100 * (i + 1) / len(snap.Chunks)})
     }
     return nil
 }, "done", "failed").RaiseOnDone("UPLOAD_FINISHED")
@@ -652,7 +686,7 @@ s.InvokeWith(func(ctx context.Context, snap MyData, h *gstate.InvokeHandle[State
 
 `ReplaceInvokeWith` is the labelled-replacement form of `InvokeWith`.
 
-**3. From a context (`gstate.Raise`).** Code deep in a call stack that only has the invoke's context can call `gstate.Raise(ctx, event)`. It works with both `Invoke` and `InvokeWith`, and it accepts any string type. That makes it convenient, but it isn't type-checked. Don't call `h.Mutate`, `h.Update`, `h.Raise` or `gstate.Raise` from inside a function passed to `Mutate` or `Update`, because they take the actor lock.
+**3. From a context (`gstate.Raise`).** Code deep in a call stack that only has the invoke's context can call `gstate.Raise(ctx, event, options...)`. It works with both `Invoke` and `InvokeWith`, and it accepts any string type. That makes it convenient, but it isn't type-checked. Don't call `h.Mutate`, `h.Update`, `h.Raise` or `gstate.Raise` from inside a function passed to `Mutate` or `Update`, because they take the actor lock.
 
 ### Actor Identity
 
