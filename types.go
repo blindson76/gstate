@@ -131,8 +131,9 @@ type TransitionDef[S ~string, E ~string, D Cloner[D]] struct {
 	actionName string
 }
 
-// RaisedEvent is an event emitted to the external system by a transition
-// configured with [TransitionBuilder.Raise].
+// RaisedEvent is an event handed to the handler installed with
+// [Machine.WithRaiseHandler]: an external event, or an internal one
+// (Internal is true) so it can be replicated or routed elsewhere.
 type RaisedEvent[S ~string, E ~string] struct {
 	// ActorID identifies the actor whose transition raised the event.
 	ActorID ActorID
@@ -143,9 +144,18 @@ type RaisedEvent[S ~string, E ~string] struct {
 	// Params are the event's parameters, copied per delivery; nil when it has
 	// none.
 	Params Params
+	// Internal reports whether the event was raised with [Internal]. See
+	// [Machine.WithInternalViaHandler] for whether the actor also processed it.
+	Internal bool
 	// Err is the service error for events raised by [InvokeBuilder.RaiseOnError];
 	// nil otherwise.
 	Err error
+}
+
+// AsEvent converts e into the [Event] to feed into an actor with
+// [Actor.SendCtxEvent], keeping its name, parameters and internal flag.
+func (e RaisedEvent[S, E]) AsEvent() Event[E] {
+	return Event[E]{Name: e.Event, Params: e.Params, Internal: e.Internal}
 }
 
 // InvokeDef defines an asynchronous service managed during a state's lifecycle.

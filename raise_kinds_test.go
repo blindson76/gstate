@@ -37,9 +37,13 @@ func TestInternalRaiseIsProcessedBeforeNextMailboxEvent(t *testing.T) {
 	if actor.State() != "right" {
 		t.Fatalf("state = %s, want right (internal NEXT must run before mailbox CHECK)", actor.State())
 	}
+	// The handler sees the internal event too, flagged as such, and nothing else.
+	if got := awaitRaised(t, ch); got.Event != "NEXT" || !got.Internal {
+		t.Fatalf("raised = %+v, want internal NEXT", got)
+	}
 	select {
 	case got := <-ch:
-		t.Fatalf("internal event leaked to external handler: %+v", got)
+		t.Fatalf("unexpected extra raise: %+v", got)
 	default:
 	}
 }

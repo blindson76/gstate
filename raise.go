@@ -34,7 +34,9 @@ const (
 	// Internal feeds the event back into the raising actor, like SCXML
 	// <raise>. Internal events are processed in order after the current step
 	// (including its eventless transitions) settles and before the next
-	// mailbox event. They need no raise handler.
+	// mailbox event. They need no raise handler; when one is installed it
+	// also receives them, with [RaisedEvent.Internal] set. See
+	// [Machine.WithInternalViaHandler] to route them only through the handler.
 	Internal
 )
 
@@ -96,11 +98,11 @@ func newRaiseDef[E ~string, D any](event E, fn func(D) Params, opts []RaiseOptio
 // invoke completion and invoke updates) see the zero Event.
 type Event[E ~string] struct {
 	// Name is the event.
-	Name E
+	Name E `json:"name"`
 	// Params are the event's parameters; nil when it has none.
-	Params Params
+	Params Params `json:"params,omitempty"`
 	// Internal reports whether the event was raised with [Internal].
-	Internal bool
+	Internal bool `json:"internal,omitempty"`
 }
 
 type internalEvent[E ~string] struct {
@@ -122,7 +124,9 @@ type invokeRaiser func(ctx context.Context, event string, opts []RaiseOption) bo
 // with [Machine.WithRaiseHandler], with the invoke's state as
 // [RaisedEvent.State], before Raise returns. Pass [Internal] to feed it back
 // into the actor instead; it is processed, with any transitions it triggers,
-// before Raise returns. Pass [Params] to attach parameters.
+// before Raise returns, and also handed to the raise handler (only handed to
+// it under [Machine.WithInternalViaHandler]). Pass [Params] to attach
+// parameters.
 //
 // The event is converted to the machine's event type, so untyped string
 // constants work: Raise(ctx, "PROGRESS", gstate.Params{"pct": 50}).
@@ -140,8 +144,9 @@ func Raise[E ~string](ctx context.Context, event E, opts ...RaiseOption) bool {
 	return raiser(ctx, string(event), opts)
 }
 
-// raiseLocked raises defs on behalf of sourceID: external events are buffered
-// for the raise handler and internal events are queued for processing. err is
+// raiseLocked raises defs on behalf of sourceID. Every event is buffered for
+// the raise handler when one is installed; internal events are also queued
+// for local processing unless they are routed via the handler. err is
 // attached to every event (RaisedEvent.Err externally, Params[ParamError]
 // internally) when non-nil. It reports whether any event was buffered or
 // queued. Must be called with a.mu held.
@@ -164,23 +169,27 @@ func (a *Actor[S, E, D]) raiseLocked(ctx context.Context, sourceID S, defs []Rai
 			}
 		}
 		raised = true
-		if def.Kind == Internal {
-			if err != nil {
-				if params == nil {
-					params = Params{}
-				}
-				params[ParamError] = err
+		if def.Kind == Internal && err != nil {
+			if params == nil {
+				params = Params{}
 			}
+			params[ParamError] = err
+		}
+		if a.raiseHandler != nil {
+			a.pendingRaises = append(a.pendingRaises, pendingRaise[S, E]{
+				ctx: ctx,
+				event: RaisedEvent[S, E]{
+					ActorID: a.id, State: sourceID, Event: def.Event,
+					Params: maps.Clone(params), Err: err, Internal: def.Kind == Internal,
+				},
+			})
+		}
+		if def.Kind == Internal && (!a.internalViaHandler || a.raiseHandler == nil) {
 			a.internalQueue = append(a.internalQueue, internalEvent[E]{
 				ctx:   ctx,
 				event: Event[E]{Name: def.Event, Params: params, Internal: true},
 			})
-			continue
 		}
-		a.pendingRaises = append(a.pendingRaises, pendingRaise[S, E]{
-			ctx:   ctx,
-			event: RaisedEvent[S, E]{ActorID: a.id, State: sourceID, Event: def.Event, Params: params, Err: err},
-		})
 	}
 	return raised
 }
